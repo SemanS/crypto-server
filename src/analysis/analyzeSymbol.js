@@ -14,10 +14,10 @@ const {
 const { safeLast, safeToFixed } = require('../utils/helpers');
 const OpenAI = require('openai');
 
-async function analyzeSymbol(symbol, timeframe = '4h', limit = 200) {
+async function analyzeSymbol(symbol, timeframe = '15m', limit = 200) {
   const exchange = new ccxt.binance({ enableRateLimit: true });
 
-  // 1) Stiahneme OHLCV
+  // 1) Stiahneme OHLCV dáta
   const ohlcv = await exchange.fetchOHLCV(symbol, timeframe, undefined, limit);
   if (!ohlcv || ohlcv.length === 0) {
     throw new Error(`Nedá sa načítať OHLCV z Binance pre symbol: ${symbol}`);
@@ -34,8 +34,11 @@ async function analyzeSymbol(symbol, timeframe = '4h', limit = 200) {
   const lastRSI = safeLast(rsiData);
 
   const macdData = MACD.calculate({
-    fastPeriod: 12, slowPeriod: 26, signalPeriod: 9,
-    SimpleMAOscillator: false, SimpleMASignal: false,
+    fastPeriod: 12, 
+    slowPeriod: 26, 
+    signalPeriod: 9,
+    SimpleMAOscillator: false, 
+    SimpleMASignal: false,
     values: closes
   });
   const lastMACD = safeLast(macdData);
@@ -78,23 +81,23 @@ async function analyzeSymbol(symbol, timeframe = '4h', limit = 200) {
   ).join('\n');
 
   const indicatorsStr = `
-  === Indikátory (z ${limit} sviečok, timeframe=${timeframe}) === 
+  === Indikátory (Timeframe=${timeframe}) === 
 RSI(14): ${safeToFixed(lastRSI, 2)}
 MACD(12,26,9): ${
   lastMACD
-    ? `MACD=${safeToFixed(lastMACD.MACD, 4)}, signal=${safeToFixed(lastMACD.signal, 4)}, hist=${safeToFixed(lastMACD.histogram, 4)}`
+    ? `MACD=\${safeToFixed(lastMACD.MACD, 4)}, signal=\${safeToFixed(lastMACD.signal, 4)}, hist=${safeToFixed(lastMACD.histogram, 4)}`
     : 'N/A'
 }
 SMA(20): ${safeToFixed(lastSMA20, 4)}
 EMA(50): ${safeToFixed(lastEMA50, 4)}
 Boll(20,2): ${
   lastBoll
-    ? `lower=${safeToFixed(lastBoll.lower, 4)}, mid=${safeToFixed(lastBoll.mid, 4)}, upper=${safeToFixed(lastBoll.upper, 4)}`
+    ? `lower=${safeToFixed(lastBoll.lower, 4)}, mid=\${safeToFixed(lastBoll.mid, 4)}, upper=${safeToFixed(lastBoll.upper, 4)}`
     : 'N/A'
 }
 ADX(14): ${
   lastADX
-    ? `adx=${safeToFixed(lastADX.adx, 2)}, pdi=${safeToFixed(lastADX.pdi, 2)}, mdi=${safeToFixed(lastADX.mdi, 2)}`
+    ? `adx=${safeToFixed(lastADX.adx, 2)}, pdi=\${safeToFixed(lastADX.pdi, 2)}, mdi=${safeToFixed(lastADX.mdi, 2)}`
     : 'N/A'
 }
 Stoch(14,3): ${
@@ -106,12 +109,14 @@ ATR(14): ${safeToFixed(lastATR, 4)}
 MFI(14): ${safeToFixed(lastMFI, 2)}
 OBV: ${safeToFixed(lastOBV, 2)}
 
-== Posledných 10 OHLCV ==
+== Posledných 10 OHLCV (timeframe: ${timeframe}) ==
 ${lastCandles}
 `;
 
+  // Prompt upravený pre kratší horizont (scalp/intradenné)
   const trendPrompt = `
-Analyzuj strednodobý trend (timeframe: ${timeframe}) na ${symbol} na základe týchto indikátorov a posledných 10 OHLCV dát:
+Analyzuj krátkodobý intradenný (scalp) trend na symbol ${symbol} (timeframe: ${timeframe}), 
+na základe týchto indikátorov a posledných 10 OHLCV dát:
 ${indicatorsStr}
 
 Vráť výsledok IBA ako validný JSON tvaru:
@@ -130,9 +135,10 @@ Vráť výsledok IBA ako validný JSON tvaru:
     organization: process.env.OPENAI_ORGANIZATION,
     apiKey: process.env.OPENAI_API_KEY,
   });
+
   const gptResp = await gpt.chat.completions.create({
     messages: [{ role: 'user', content: trendPrompt }],
-    model: 'gpt-4o'
+    model: 'o1-preview'
   });
   let rawContent = gptResp.choices[0].message.content || '';
   console.log("rawContent" + JSON.stringify(rawContent))

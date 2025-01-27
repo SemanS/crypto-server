@@ -188,7 +188,7 @@ async function analyzeScalpSymbol(symbol) {
     });
     const gptResp = await gpt.chat.completions.create({
       messages: [{ role: 'user', content: prompt }],
-      model: 'gpt-4o'
+      model: 'o1-preview'
     });
   
     console.log("gptResp" + JSON.stringify(gptResp))

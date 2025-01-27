@@ -157,7 +157,7 @@ Vráť výsledok IBA ako validný JSON tvaru:
   });
   const gptResp = await gpt.chat.completions.create({
     messages: [{ role: 'user', content: promptText }],
-    model: 'gpt-4o'
+    model: 'o1-preview'
   });
   let rawContent = gptResp.choices[0].message.content || '';
   rawContent = rawContent.replace(/```(\w+)?/g, '').trim();
