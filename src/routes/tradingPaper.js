@@ -1,3 +1,8 @@
+const express = require('express');
+const router = express.Router();
+const ccxt = require('ccxt');
+
+// Pre analýzy z GPT alebo iných prístupov
 const { analyzeSymbolMultiTF } = require('../analysis/analyzeSymbolMultiTF');
 const { analyzeSymbolComprehensiveApproach } = require('../analysis/analyzeSymbolComprehensiveApproach');
 const { analyzeSymbolResearchApproach } = require('../analysis/analyzeSymbolResearchApproach');
@@ -7,7 +12,7 @@ const { analyzeSymbolRobustChainingApproach } = require('../analysis/analyzeSymb
 const paperTrades = {};
 
 //----------------------------------------------------------------------
-// 1) bestCandidates - stiahneme top USDT pairs, dáme GPT
+// 1) bestCandidates - stiahneme top USDT pairs, dáme GPT (pôvodná funkcia)
 //----------------------------------------------------------------------
 router.get('/bestCandidates', async (req, res) => {
   try {
@@ -80,7 +85,60 @@ Pick 5 best coins to trade now, consider 24h% = momentum, volume=liquidity. Retu
 });
 
 //----------------------------------------------------------------------
-// 2) reevaluateSymbol
+// 2) Pridávame /scalpCandidates – rýchly filter na 15min sviečkach
+//    Vhodné pre 30–60 minútové scalp obchody
+//----------------------------------------------------------------------
+router.get('/scalpCandidates', async (req, res) => {
+  try {
+    // 1) Načítame top USDT páry (napr. podľa objemu)
+    const exchange = new ccxt.binance({ enableRateLimit: true });
+    await exchange.loadMarkets();
+
+    const allSymbols = Object.keys(exchange.markets);
+    const usdtPairs = allSymbols.filter(s => s.endsWith('/USDT'));
+    // Pre rýchlosť zoberme prvých 30-50
+    const top50 = usdtPairs.slice(0, 50);
+
+    // 2) Pre každý symbol načítame OHLCV (timeframe=15m), posledné 4 sviečky = cca 1 hodina
+    let resultArr = [];
+    for (let sym of top50) {
+      try {
+        const ohlcv = await exchange.fetchOHLCV(sym, '15m', undefined, 4);
+        // OHLCV formát: [timestamp, open, high, low, close, volume]
+
+        if (ohlcv.length < 2) continue;
+        const firstClose = ohlcv[0][4];
+        const lastClose  = ohlcv[ohlcv.length-1][4];
+        const movement   = (lastClose - firstClose) / firstClose * 100; // % pohyb za 4 sviečky
+        const sumVolume  = ohlcv.reduce((acc, c) => acc + (c[5] || 0), 0);
+
+        resultArr.push({
+          symbol: sym,
+          movementPct: Number(movement.toFixed(2)),
+          sumVolume:   Number(sumVolume.toFixed(2)),
+          reason: `Volatility in last hour: ${movement.toFixed(2)}%`
+        });
+      } catch(e) {
+        // Môže nastať error pri fetchOHLCV, symbol preskočíme
+        console.warn(`scalpCandidates: (skipping ${sym})`, e.message);
+      }
+    }
+
+    // 3) Zoraďme podľa absolútneho pohybu (najväčší na začiatku)
+    resultArr.sort((a,b) => Math.abs(b.movementPct) - Math.abs(a.movementPct));
+
+    // 4) Vyberieme top 5
+    const top5 = resultArr.slice(0,5);
+
+    return res.json({ pairs: top5 });
+  } catch (err) {
+    console.error("Chyba GET /scalpCandidates:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+//----------------------------------------------------------------------
+// 3) reevaluateSymbol
 //----------------------------------------------------------------------
 router.get('/reevaluateSymbol', async (req, res) => {
   try {
@@ -121,7 +179,7 @@ router.get('/reevaluateSymbol', async (req, res) => {
 });
 
 //----------------------------------------------------------------------
-// 3) POST /api/startPaperTrade
+// 4) POST /api/startPaperTrade
 //----------------------------------------------------------------------
 router.post('/startPaperTrade', async (req, res) => {
   try {
@@ -160,6 +218,7 @@ router.post('/startPaperTrade', async (req, res) => {
       takeProfitPrice: null
     };
 
+    // Nastavíme stopLoss a takeProfit
     if (side.toUpperCase() === 'BUY') {
       newTrade.stopLossTrigger = lastPrice * (1 - 0.02);
       if (newTrade.takeProfitPct>0) {
@@ -172,7 +231,6 @@ router.post('/startPaperTrade', async (req, res) => {
       }
     }
 
-    // Uložíme a monitorujeme
     paperTrades[tradeId] = newTrade;
     monitorPaperTrade(tradeId);
 
@@ -185,7 +243,7 @@ router.post('/startPaperTrade', async (req, res) => {
 });
 
 //----------------------------------------------------------------------
-// 4) GET /api/paperTrades
+// 5) GET /api/paperTrades
 //----------------------------------------------------------------------
 router.get('/paperTrades', async (req, res) => {
   try {
@@ -218,7 +276,6 @@ router.get('/paperTrades', async (req, res) => {
         if (fetchedPrice) {
           t.currentPrice = fetchedPrice;
         } else {
-          // fallback ak nevieme zohnať last price
           t.currentPrice = t.entryPrice;
         }
         if (t.side.toUpperCase()==='BUY') {
@@ -241,7 +298,7 @@ router.get('/paperTrades', async (req, res) => {
 });
 
 //----------------------------------------------------------------------
-// 5) monitorPaperTrade => trailing stopLoss
+// 6) monitorPaperTrade => trailing stopLoss
 //----------------------------------------------------------------------
 function monitorPaperTrade(tradeId){
   const CHECK_INTERVAL_MS = 5000;
@@ -257,9 +314,7 @@ function monitorPaperTrade(tradeId){
       let currentPrice = t.entryPrice;
       if (ticker && ticker.last) {
         currentPrice = ticker.last;
-      } else {
-        console.warn(`monitorPaperTrade: no 'last' for symbol ${t.symbol}, fallback to entryPrice`);
-      }
+      } 
 
       if (t.side.toUpperCase()==='BUY') {
         if (currentPrice > t.highestPrice) {
@@ -303,14 +358,11 @@ function monitorPaperTrade(tradeId){
     } catch(e) {
       console.error(`Chyba monitorPaperTrade(${tradeId}):`, e.message);
     }
-    // zreťazíme
     if(paperTrades[tradeId] && paperTrades[tradeId].status==='OPEN'){
       setTimeout(checkLoop, CHECK_INTERVAL_MS);
     }
   }
-
   setTimeout(checkLoop, CHECK_INTERVAL_MS);
 }
-
 
 module.exports = router;
