@@ -12,7 +12,7 @@ def main():
 
     # 2) Zoznam párov, ktoré chceš sledovať (a „nakúpiť“)
     pairs = [
-        "PYR/USDT",
+        "CTXC/USDT",
     ]
 
     exchange = ccxt.binance()  # alebo iná burza z ccxt

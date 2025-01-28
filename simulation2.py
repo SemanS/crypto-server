@@ -7,12 +7,12 @@ def main():
     # 1) Konfigurácia
     leverage = 1.0
     used_margin = 1000.0   # koľko USDT „vkladáme“ do každého obchodu
-    max_loss = 15.0        # StopLoss (USDT)
-    target_profit = 15.0  # TakeProfit (USDT)
+    max_loss = 25.0        # StopLoss (USDT)
+    target_profit = 20.0  # TakeProfit (USDT)
 
     # 2) Zoznam párov, ktoré chceš sledovať (a „nakúpiť“)
     pairs = [
-        "PYR/USDT",
+        "AIXBT/USDT",
     ]
 
     exchange = ccxt.binance()  # alebo iná burza z ccxt
