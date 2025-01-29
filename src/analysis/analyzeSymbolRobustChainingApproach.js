@@ -1,5 +1,4 @@
 const OpenAI = require('openai');
-const ccxt = require('ccxt');
 
 const {
   RSI, MACD, SMA, BollingerBands, ADX,

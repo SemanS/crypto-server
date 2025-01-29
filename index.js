@@ -8,10 +8,12 @@ app.use(express.json());
 
 const topmoversRouter = require('./src/routes/topmovers');
 const tradingPaperRoutes = require('./src/routes/tradingPaper');
+const backTestRoute = require('./src/services/backTestRoute');
 
 // Priradíme route moduly pod prefix /api
 app.use('/api', topmoversRouter);
 app.use('/api', tradingPaperRoutes);
+app.use('/api', backTestRoute);
 
 // Spustenie servera
 const PORT = process.env.PORT || 3001;

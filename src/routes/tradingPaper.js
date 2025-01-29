@@ -7,7 +7,7 @@ const { analyzeSymbolMultiTF } = require('../analysis/analyzeSymbolMultiTF');
 const { analyzeSymbolComprehensiveApproach } = require('../analysis/analyzeSymbolComprehensiveApproach');
 const { analyzeSymbolResearchApproach } = require('../analysis/analyzeSymbolResearchApproach');
 const { analyzeSymbolRobustChainingApproach } = require('../analysis/analyzeSymbolRobustChainingApproach');
-
+const { simulate } = require('../services/simulation');
 // V pamäti držíme simulované obchody (paper trades)
 const paperTrades = {};
 
@@ -364,5 +364,16 @@ function monitorPaperTrade(tradeId){
   }
   setTimeout(checkLoop, CHECK_INTERVAL_MS);
 }
+
+// GET /api/simulation
+router.get('/simulation', async (req, res) => {
+  try {
+    const result = await simulate();
+    return res.json({ ok: true, result });
+  } catch (err) {
+    console.error('Chyba pri simulácii:', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 module.exports = router;
