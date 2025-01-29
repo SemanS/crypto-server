@@ -19,10 +19,10 @@ async function loadAllTimeframes(symbol) {
 
 router.get('/backTest', async (req, res) => {
   try {
-    const symbol = req.query.symbol || 'XMR/USDT';
+    const symbol = req.query.symbol || 'OG/USDT';
     
     // Change this to however many hours you want to go back.
-    const hoursToBacktest = 96;
+    const hoursToBacktest = 250;
 
     // 1) Load data
     const { ohlcvDaily, ohlcv1h, ohlcv15m } = await loadAllTimeframes(symbol);
@@ -34,52 +34,43 @@ router.get('/backTest', async (req, res) => {
       throw new Error(`Not enough hourly data for a ${hoursToBacktest}-hour backtest. We only have ${totalHourly} candles.`);
     }
 
-    // 2) Build tasks array for parallel GPT calls:
-    const tasks = [];
+    // 2) Sekvenčne voláme GPT pre každý krok backtestu:
+    const results = [];
     for (let i = 0; i < hoursToBacktest; i++) {
       const cIndex = totalHourly - (hoursToBacktest + 1) + i;
-
-      // Make sure we don't step out of bounds
       if (cIndex + 1 >= totalHourly) {
         break;
       }
 
-      tasks.push(
-        (async () => {
-          // Prepare slices for GPT, so we do not look into future data
-          const hourDataSlice = ohlcv1h.slice(0, cIndex + 1);
-          const min15Slice    = ohlcv15m.slice(0, cIndex * 4 + 1);
+      // Prepare slices for GPT, so we do not look into future data
+      const hourDataSlice = ohlcv1h.slice(0, cIndex + 1);
+      const min15Slice    = ohlcv15m.slice(0, cIndex * 4 + 1);
+      const lastHourTimestamp = hourDataSlice[hourDataSlice.length - 1][0];
+      const dailyDataSlice    = ohlcvDaily.filter(d => d[0] <= lastHourTimestamp);
 
-          const lastHourTimestamp = hourDataSlice[hourDataSlice.length - 1][0];
-          const dailyDataSlice = ohlcvDaily.filter(d => d[0] <= lastHourTimestamp);
-
-          // Run GPT offline analysis
-          const analysis = await analyzeSymbolRobustChainingApproachOffline(
-            symbol,
-            dailyDataSlice,
-            min15Slice,
-            hourDataSlice
-          );
-          const finalAction = analysis.gptOutput.final_action || 'HOLD';
-
-          // Compute PnL by opening at cIndex, closing at cIndex+1 
-          const openPrice  = hourDataSlice[hourDataSlice.length - 1][4];  
-          const closePrice = ohlcv1h[cIndex + 1][4];
-          let tradePnL = 0;
-          if (finalAction === 'BUY') {
-            tradePnL = closePrice - openPrice;
-          } else if (finalAction === 'SELL') {
-            tradePnL = openPrice - closePrice;
-          }
-          return { i, cIndex, finalAction, openPrice, closePrice, tradePnL };
-        })()
+      // Run GPT offline analysis (sekvenčne, s await)
+      const analysis = await analyzeSymbolRobustChainingApproachOffline(
+        symbol,
+        dailyDataSlice,
+        min15Slice,
+        hourDataSlice
       );
+      const finalAction = analysis.gptOutput.final_action || 'HOLD';
+
+      // Compute PnL by opening at cIndex, closing at cIndex+1 
+      const openPrice  = hourDataSlice[hourDataSlice.length - 1][4];  
+      const closePrice = ohlcv1h[cIndex + 1][4];
+      let tradePnL = 0;
+      if (finalAction === 'BUY') {
+        tradePnL = closePrice - openPrice;
+      } else if (finalAction === 'SELL') {
+        tradePnL = openPrice - closePrice;
+      }
+
+      results.push({ i, cIndex, finalAction, openPrice, closePrice, tradePnL });
     }
 
-    // 3) Wait for all GPT calls to finish
-    const results = await Promise.all(tasks);
-
-    // 4) Summarize PnL
+    // 3) Summarize PnL
     let summaryPnL = 0;
     for (const r of results) {
       summaryPnL += r.tradePnL;

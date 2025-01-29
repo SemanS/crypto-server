@@ -109,10 +109,11 @@ async function analyzeSymbolRobustChainingApproachOffline(
   try {
     const resp1 = await openAiClient.chat.completions.create({
       messages: [{ role: 'user', content: dailyPrompt }],
-      model: 'o1-preview'
+      model: 'o1-preview',
     });
     let raw1 = resp1.choices[0]?.message?.content || '';
-    raw1 = raw1.replace(/```/g, '').trim();
+    raw1     = raw1.replace(/```(\w+)?/g, '').trim();
+
     dailyParsed = JSON.parse(raw1);
   } catch (e) {
     console.warn("GPT offline macro daily parse error:", e.message);
@@ -128,7 +129,7 @@ async function analyzeSymbolRobustChainingApproachOffline(
   try {
     const resp2 = await openAiClient.chat.completions.create({
       messages: [{ role: 'user', content: synergyPrompt }],
-      model: 'gpt-4o'
+      model: 'o1-preview',
     });
     let raw2 = resp2.choices[0]?.message?.content || '';
     raw2     = raw2.replace(/```(\w+)?/g, '').trim();
