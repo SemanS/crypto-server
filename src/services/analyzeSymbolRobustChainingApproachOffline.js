@@ -223,7 +223,7 @@ async function analyzeSymbolRobustChainingApproachOffline(
     });
     console.log("[LOG synergyPrompt] =>", synergyPrompt);
     const resp3 = await openAiClient.chat.completions.create({
-      model: 'gpt-4',
+      model: 'o1-preview',
       messages: [{ role: 'user', content: synergyPrompt }]
     });
 
