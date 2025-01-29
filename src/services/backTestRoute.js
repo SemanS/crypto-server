@@ -7,6 +7,7 @@ const { analyzeSymbolRobustChainingApproachOffline } = require('./analyzeSymbolR
 function tsToISO(ts) {
   return new Date(ts).toISOString();
 }
+
 function timeframeToMs(timeframe) {
   switch (timeframe) {
     case '1m':   return 60 * 1000;
@@ -22,9 +23,22 @@ function timeframeToMs(timeframe) {
 }
 
 /**
- * fetchOHLCVInChunks:
- *   Sťahuje OHLCV po "limit" candle v cykle, až kým nedosiahneme toTime alebo kým burza neprestane vracať dáta.
+ * Nájde closePrice v 15-min candle, ktorá obsahuje targetTime.
+ * Ak nenájde, vráti null (znamená, že nemáme dáta pre uzavretie obchodu).
+ * Candle formát: [ts, open, high, low, close, volume], kde ts je začiatok 15m.
+ * targetTime ∈ [ts, ts+15min)
  */
+function find15mClosePriceAtTime(min15Candles, targetTime) {
+  for (let i = 0; i < min15Candles.length; i++) {
+    const cStart = min15Candles[i][0];
+    const cEnd   = cStart + timeframeToMs('15m');
+    if (cStart <= targetTime && targetTime < cEnd) {
+      return min15Candles[i][4]; // close
+    }
+  }
+  return null; // nenašli sme candle pokrývajúcu targetTime
+}
+
 async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, limit = 1000) {
   let allOhlcv = [];
   let since    = fromTS;
@@ -70,20 +84,13 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
 
 /**
  * loadTimeframesForBacktest:
- * Tu je podstatný trik – ak príde fromTime (prvý deň simulácie),
- * znížime ho o 60 dní a takto fetchneme dáta. Tých 60 dní nám
- * slúži ako warm-up, aby indikátory neboli "undefined" hneď
- * pri fromTime. Avšak reálne simulovanie začína až v /backTest kóde od fromTime.
+ *  - Warm-up 60 dní pre indikátory
  */
 async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   const exchange = new ccxt.binance({ enableRateLimit: true });
   const limit    = 1000;
 
-  // 60-dňový buffer pre daily / weekly / 1h / 15m
   const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
-
-  // Ak fromTime nie je definované, tak fetchujeme od nuly. 
-  // Inak fetchujeme od (fromTime - 60 dní).
   const fromTimeWithBuffer = fromTime
     ? Math.max(0, fromTime - SIXTY_DAYS_MS)
     : 0;
@@ -91,30 +98,30 @@ async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   console.log(`[LOG] loadTimeframesForBacktest => symbol=${symbol}, fromTime=${tsToISO(fromTime)}, toTime=${tsToISO(toTime)}`);
   console.log(`[LOG] using fromTimeWithBuffer=${tsToISO(fromTimeWithBuffer)} (warm-up 60d)`);
 
-  const ohlcvDailyAll  = await fetchOHLCVInChunks(exchange, symbol, '1d',  fromTimeWithBuffer,  toTime, limit);
-  const ohlcvWeeklyAll = await fetchOHLCVInChunks(exchange, symbol, '1w',  fromTimeWithBuffer,  toTime, limit);
-  const ohlcv1hAll     = await fetchOHLCVInChunks(exchange, symbol, '1h',  fromTimeWithBuffer,  toTime, limit);
-  const ohlcv15mAll    = await fetchOHLCVInChunks(exchange, symbol, '15m', fromTimeWithBuffer,  toTime, limit);
+  const ohlcvDailyAll  = await fetchOHLCVInChunks(exchange, symbol, '1d',  fromTimeWithBuffer, toTime, limit);
+  const ohlcvWeeklyAll = await fetchOHLCVInChunks(exchange, symbol, '1w',  fromTimeWithBuffer, toTime, limit);
+  const ohlcv1hAll     = await fetchOHLCVInChunks(exchange, symbol, '1h',  fromTimeWithBuffer, toTime, limit);
+  const ohlcv15mAll    = await fetchOHLCVInChunks(exchange, symbol, '15m', fromTimeWithBuffer, toTime, limit);
 
   console.log(`[LOG] => daily=${ohlcvDailyAll.length}, weekly=${ohlcvWeeklyAll.length}, 1h=${ohlcv1hAll.length}, 15m=${ohlcv15mAll.length}`);
   return { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll };
 }
 
 // ------------------------------------------------------------------------
-// Tu je /backTest end-point
+// /backTest endpoint
 // ------------------------------------------------------------------------
 router.get('/backTest', async (req, res) => {
   try {
-    const symbol = req.query.symbol || 'OG/USDT';
+    const symbol          = req.query.symbol || 'OG/USDT';
+    let fromTime          = req.query.fromDate ? new Date(req.query.fromDate).getTime() : undefined;
+    let toTime            = req.query.toDate   ? new Date(req.query.toDate).getTime()   : undefined;
+    if (isNaN(fromTime))  fromTime = undefined;
+    if (isNaN(toTime))    toTime   = undefined;
 
-    let fromTime = req.query.fromDate ? new Date(req.query.fromDate).getTime() : undefined;
-    let toTime   = req.query.toDate   ? new Date(req.query.toDate).getTime()   : undefined;
-    if (isNaN(fromTime)) fromTime = undefined;
-    if (isNaN(toTime))   toTime   = undefined;
-
+    // Koľko hodín chceme nasimulovať
     const hoursToBacktest = parseInt(req.query.hoursToBacktest || '12');
 
-    // 1) Načítame dáta (aj buffer)
+    // 1) Načítame (s warm-up bufferom)
     const {
       ohlcvDailyAll,
       ohlcvWeeklyAll,
@@ -122,7 +129,7 @@ router.get('/backTest', async (req, res) => {
       ohlcv15mAll
     } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
 
-    // 2) Zachováme celé dáta (vrátane bufferu) až po toTime
+    // 2) Zachováme dáta max po toTime
     function filterInRange(data) {
       let out = data;
       if (toTime) out = out.filter(c => c[0] <= toTime);
@@ -133,46 +140,46 @@ router.get('/backTest', async (req, res) => {
     const hourDataBacktest   = filterInRange(ohlcv1hAll);
     const min15DataBacktest  = filterInRange(ohlcv15mAll);
 
-    // Skontrolujeme, či máme dosť hour-sviečok na hoursToBacktest
-    const totalHourly = hourDataBacktest.length;
-    console.log(`[LOG] totalHourly(after filter)=${totalHourly}, hoursToBacktest=${hoursToBacktest}`);
-    if (totalHourly < hoursToBacktest + 1) {
-      throw new Error(`Not enough hourly data => we have ${totalHourly}, needed >= ${hoursToBacktest + 1}.`);
+    // 3) Nájdeme index prvej hour-sviečky >= fromTime
+    if (!fromTime && hourDataBacktest.length > 0) {
+      fromTime = hourDataBacktest[0][0];
+    }
+    const fromIndex = hourDataBacktest.findIndex(c => c[0] >= fromTime);
+    if (fromIndex === -1) {
+      throw new Error(`No hour data found at or after fromTime=${tsToISO(fromTime)}`);
     }
 
-    // 3) Spustíme backtest: iterujeme od najstaršej sviečky (z backtest setu) po najnovšiu,
-    //    ale v praxi sa posúvame len hoursToBacktest hodín smerom ku koncu.
+    console.log(`[LOG] fromIndex=${fromIndex}, hourDataBacktest[fromIndex]=${tsToISO(hourDataBacktest[fromIndex][0])}`);
+
     let runningPnL = 0;
     const results  = [];
 
+    // 4) Spustíme backtest po hodinách, počnúc fromIndex
     for (let i = 0; i < hoursToBacktest; i++) {
-      // cIndex = index do hourDataBacktest, ktorý sa posúva smerom k poslednej sviečke
-      const cIndex = totalHourly - (hoursToBacktest + 1) + i;
-      if (cIndex + 1 >= totalHourly) break;
+      const cIndex = fromIndex + i;
+      const hourCandle = hourDataBacktest[cIndex];
+      if (!hourCandle) break;
 
-      // hourDataSlice = historické hour-dáta do tohto momentu (vrátane)
+      const lastHourTS = hourCandle[0];   // start time hour candle
+      const hourClose  = hourCandle[4];   // close tejto hour sviečky (end hour price)
+      console.log(`[LOG] iteration=${i}, cIndex=${cIndex}, lastHourTS=${tsToISO(lastHourTS)}`);
+
+      // hourDataSlice: celé hourly dáta do cIndex
       const hourDataSlice = hourDataBacktest.slice(0, cIndex + 1);
+      // min15Slice: len tie 15m, ktoré sú <= lastHourTS
+      const min15Slice    = min15DataBacktest.filter(m => m[0] + timeframeToMs('15m') <= lastHourTS);
 
-      // min15Slice = historické 15m-dáta do tohto momentu
-      // (hrubý príklad, 1h = 4 × 15m)
-      const min15Slice = min15DataBacktest.slice(0, cIndex * 4 + 1);
-
-      const lastHourTS = hourDataBacktest[cIndex][0];
-      console.log(`[LOG] iteration#=${i}, cIndex=${cIndex}, lastHourTS=${tsToISO(lastHourTS)}`);
-
-      // daily/weekly: vyberieme tie, ktoré majú timestamp <= lastHourTS
+      // daily/weekly data
       const dailyAll  = dailyDataBacktest.filter(d => d[0] <= lastHourTS);
       const weeklyAll = weeklyDataBacktest.filter(w => w[0] <= lastHourTS);
 
       const ONE_DAY_MS  = 24 * 60 * 60 * 1000;
       const ONE_WEEK_MS = 7  * ONE_DAY_MS;
 
-      // Filtrujeme len tie daily/weekly, ktoré sú kompletne uzavreté do lastHourTS
       const dailyDataSlice  = dailyAll.filter(c => lastHourTS >= c[0] + ONE_DAY_MS);
       const weeklyDataSlice = weeklyAll.filter(c => lastHourTS >= c[0] + ONE_WEEK_MS);
 
-      // 4) GPT analýza s 5 parametrami (daily, weekly, 15m, 1h)
-      //    dôležité: do analyzy idú len tie dáta, ktoré reálne existovali do lastHourTS
+      // 4A) GPT analýza
       const analysis = await analyzeSymbolRobustChainingApproachOffline(
         symbol,
         dailyDataSlice,
@@ -181,28 +188,45 @@ router.get('/backTest', async (req, res) => {
         hourDataSlice
       );
       const synergy = analysis.gptOutput || {};
-
-      // 5) Vypočítame hypotetický zisk alebo stratu
       const finalAction = synergy.final_action || 'HOLD';
-      const nextCandle  = hourDataBacktest[cIndex + 1];
-      const openPrice   = nextCandle[1];
-      const closePrice  = nextCandle[4];
 
+      // 4B) Otvorenie obchodu (ak BUY/SELL) na konci tejto hour sviečky
+      let openPrice  = hourClose;
+      let openTime   = lastHourTS + timeframeToMs('1h'); 
+        // hourCandle[0] je start, +1h je reálny koniec hour sviečky
+
+      // 4C) Uzavretie presne o 1h neskôr (využijeme 15m data)
+      const closeTime = openTime + timeframeToMs('1h');  
+        // presne 1h od konca tejto hour sviečky
+      const closePrice = (finalAction === 'HOLD')
+        ? openPrice  // ak je HOLD, spravíme PnL=0, je to len pre formálnu hodnotu
+        : find15mClosePriceAtTime(min15DataBacktest, closeTime);
+
+      if (closePrice === null) {
+        // Nenašli sme 15m candle, ktorá by pokrývala closeTime => nemáme dáta => koniec
+        console.log(`[LOG]   No 15m candle found for closeTime=${tsToISO(closeTime)} => break`);
+        break;
+      }
+
+      // 4D) Vypočítame hypotetické PnL
       let tradePnL = 0;
       if (finalAction === 'BUY') {
         tradePnL = ((closePrice - openPrice) / openPrice) * 100;
       } else if (finalAction === 'SELL') {
         tradePnL = ((openPrice - closePrice) / openPrice) * 100;
+      } else {
+        // HOLD => 0
       }
 
       runningPnL += tradePnL;
-      console.log(`[LOG]   finalAction=${finalAction}, open=${openPrice}, close=${closePrice}, tradePnL=${tradePnL.toFixed(3)}%, runningPnL=${runningPnL.toFixed(3)}%`);
+      console.log(`[LOG]   finalAction=${finalAction}, openTime=${tsToISO(openTime)}, closeTime=${tsToISO(closeTime)}, openPrice=${openPrice}, closePrice=${closePrice}, tradePnL=${tradePnL.toFixed(3)}%, runningPnL=${runningPnL.toFixed(3)}%`);
 
-      // Uložíme krok
       results.push({
         iteration: i,
         cIndex,
         lastHourTS,
+        openTime,
+        closeTime,
         finalAction,
         openPrice,
         closePrice,
@@ -211,9 +235,9 @@ router.get('/backTest', async (req, res) => {
       });
     }
 
-    console.log('[LOG] Final PnL(%)=', runningPnL.toFixed(3));
+    console.log('[LOG] Final PnL(%) =', runningPnL.toFixed(3));
 
-    // 6) Vrátime výsledok
+    // 5) Výstup
     return res.json({
       success: true,
       finalPnLPercent: runningPnL,
@@ -222,7 +246,7 @@ router.get('/backTest', async (req, res) => {
 
   } catch (err) {
     console.error('[ERROR in /backTest]', err);
-    return res.status(500).json({ success:false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
