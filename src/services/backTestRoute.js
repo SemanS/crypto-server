@@ -5,47 +5,55 @@ const {
   analyzeSymbolRobustChainingApproachOffline
 } = require('./analyzeSymbolRobustChainingApproachOffline');
 
+// Helper for loading OHLCV from Binance
 async function loadAllTimeframes(symbol) {
   const exchange = new ccxt.binance({ enableRateLimit: true });
+  
+  // Fetch daily, hourly, 15m data (200-300 candles for each)
   const ohlcvDaily = await exchange.fetchOHLCV(symbol, '1d', undefined, 200);
   const ohlcv1h    = await exchange.fetchOHLCV(symbol, '1h', undefined, 300);
   const ohlcv15m   = await exchange.fetchOHLCV(symbol, '15m', undefined, 300);
+
   return { ohlcvDaily, ohlcv1h, ohlcv15m };
 }
 
 router.get('/backTest', async (req, res) => {
   try {
-    const symbol = req.query.symbol || 'OG/USDT';
+    const symbol = req.query.symbol || 'XMR/USDT';
+    
+    // Change this to however many hours you want to go back.
+    const hoursToBacktest = 96;
 
-    // 1) Načítame dáta
+    // 1) Load data
     const { ohlcvDaily, ohlcv1h, ohlcv15m } = await loadAllTimeframes(symbol);
     
     const totalHourly = ohlcv1h.length;
-    if (totalHourly < 25) {
-      throw new Error('Nemáme dosť hodinových dát na simuláciu 24h.');
+    // We need at least 97 hourly candles to do a 96-hour simulation 
+    // (because we open at cIndex and close at cIndex+1).
+    if (totalHourly < hoursToBacktest + 1) {
+      throw new Error(`Not enough hourly data for a ${hoursToBacktest}-hour backtest. We only have ${totalHourly} candles.`);
     }
 
-    // 2) Naberieme si "tasky" do poľa (každá hodinová analýza zvlášť)
+    // 2) Build tasks array for parallel GPT calls:
     const tasks = [];
-    for (let i = 0; i < 24; i++) {
-      const cIndex = totalHourly - 25 + i;
-      // Skontrolujeme, či ideme otvoriť a zatvoriť ešte v rozmedzí
+    for (let i = 0; i < hoursToBacktest; i++) {
+      const cIndex = totalHourly - (hoursToBacktest + 1) + i;
+
+      // Make sure we don't step out of bounds
       if (cIndex + 1 >= totalHourly) {
         break;
       }
 
-      // Každý i spracujeme v paralelnom Promise
       tasks.push(
         (async () => {
-          // Tu si pripravíme slice-y pre GPT, 
-          // aby sme náhodou nesiahali do "budúcich" dát:
+          // Prepare slices for GPT, so we do not look into future data
           const hourDataSlice = ohlcv1h.slice(0, cIndex + 1);
-          const min15Slice = ohlcv15m.slice(0, cIndex * 4 + 1);
+          const min15Slice    = ohlcv15m.slice(0, cIndex * 4 + 1);
 
           const lastHourTimestamp = hourDataSlice[hourDataSlice.length - 1][0];
           const dailyDataSlice = ohlcvDaily.filter(d => d[0] <= lastHourTimestamp);
 
-          // Spustíme GPT analýzu
+          // Run GPT offline analysis
           const analysis = await analyzeSymbolRobustChainingApproachOffline(
             symbol,
             dailyDataSlice,
@@ -54,8 +62,8 @@ router.get('/backTest', async (req, res) => {
           );
           const finalAction = analysis.gptOutput.final_action || 'HOLD';
 
-          // Na výpočet PnL budeme otvárať a zatvárať o 1 hodinu neskôr
-          const openPrice = hourDataSlice[hourDataSlice.length - 1][4];  
+          // Compute PnL by opening at cIndex, closing at cIndex+1 
+          const openPrice  = hourDataSlice[hourDataSlice.length - 1][4];  
           const closePrice = ohlcv1h[cIndex + 1][4];
           let tradePnL = 0;
           if (finalAction === 'BUY') {
@@ -63,24 +71,15 @@ router.get('/backTest', async (req, res) => {
           } else if (finalAction === 'SELL') {
             tradePnL = openPrice - closePrice;
           }
-
-          // Vrátime dáta, čo potrebujeme na finálnu rekapituláciu
-          return {
-            i,
-            cIndex,
-            finalAction,
-            openPrice,
-            closePrice,
-            tradePnL
-          };
+          return { i, cIndex, finalAction, openPrice, closePrice, tradePnL };
         })()
       );
     }
 
-    // 3) Počkáme, kým všetky GPT dopyty skončia
+    // 3) Wait for all GPT calls to finish
     const results = await Promise.all(tasks);
 
-    // 4) Následne spočítame sumárny PnL a zalogujeme
+    // 4) Summarize PnL
     let summaryPnL = 0;
     for (const r of results) {
       summaryPnL += r.tradePnL;
@@ -97,7 +96,7 @@ router.get('/backTest', async (req, res) => {
       finalPnL: summaryPnL
     });
   } catch (err) {
-    console.error('Chyba pri 24h simulácii offline:', err);
+    console.error('Error in 96h offline simulation:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
