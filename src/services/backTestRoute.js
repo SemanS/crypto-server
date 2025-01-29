@@ -1,20 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const ccxt = require('ccxt');
-const {
-  analyzeSymbolRobustChainingApproachOffline
-} = require('./analyzeSymbolRobustChainingApproachOffline');
 
-/**
- * Na prehľadné logovanie timestamp do ISO formátu.
- */
+// Tu importujete svoju GPT analýzu:
+const { analyzeSymbolRobustChainingApproachOffline } = require('./analyzeSymbolRobustChainingApproachOffline');
+
+// Pomocné funkcie na logy a timeframe
 function tsToISO(ts) {
   return new Date(ts).toISOString();
 }
-
-/**
- * Konverzia timeframe na milisekundy.
- */
 function timeframeToMs(timeframe) {
   switch (timeframe) {
     case '1m':   return 60 * 1000;
@@ -29,19 +23,20 @@ function timeframeToMs(timeframe) {
 }
 
 /**
- * Sťahovanie OHLCV v "dávkach" (limit = 1000) a spájanie, kým nedosiahneme toTime alebo koniec histórie.
- * Pridali sme logy, aby ste videli, čo CCXT vrátilo v jednotlivých chunk-och.
+ * fetchOHLCVInChunks:
+ *   Sťahuje OHLCV po "limit" candle v cykle, až kým nedosiahneme toTime alebo kým burza neprestane vracať dáta.
  */
 async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, limit = 1000) {
   let allOhlcv = [];
-  let since = fromTS;
-  const finalTS = toTS || Date.now();
+  let since    = fromTS;
+  const finalTS= toTS || Date.now();
 
   console.log(`[LOG] fetchOHLCVInChunks => symbol=${symbol}, timeframe=${timeframe}, fromTS=${tsToISO(fromTS)}, toTS=${tsToISO(toTS)}`);
 
   while (true) {
     console.log(`[LOG]   Attempt fetch since=${tsToISO(since)}`);
     const batch = await exchange.fetchOHLCV(symbol, timeframe, since, limit);
+
     if (!batch || batch.length === 0) {
       console.log('[LOG]   Batch is empty => break');
       break;
@@ -52,21 +47,22 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
 
     const lastTS = batch[batch.length - 1][0];
     if (lastTS >= finalTS) {
-      console.log(`[LOG]   lastTS >= finalTS => break`);
+      console.log('[LOG]   lastTS >= finalTS => break');
       break;
     }
     if (batch.length < limit) {
-      console.log(`[LOG]   batch.length < limit => probably end of available data => break`);
+      console.log('[LOG]   batch.length < limit => probably end of available data => break');
       break;
     }
 
     since = lastTS + timeframeToMs(timeframe);
     if (since > finalTS) {
-      console.log(`[LOG]   since > finalTS => break`);
+      console.log('[LOG]   since > finalTS => break');
       break;
     }
   }
 
+  // Odstránime prípadné (timestamp > finalTS)
   const filtered = allOhlcv.filter(c => c[0] <= finalTS);
   console.log(`[LOG] fetchOHLCVInChunks DONE => totalCandles=${filtered.length}, fromTS=${tsToISO(fromTS)}, toTS=${tsToISO(toTS)}`);
   if (filtered.length > 0) {
@@ -77,14 +73,14 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
 
 /**
  * loadTimeframesForBacktest:
- *  - Pre daily berieme starší "fromTimeDaily" => fromTime - buffer (60 dní),
- *    aby GPT videlo staršie daily candle.
- *  - Pre 1h, 15m berieme len [fromTime..toTime].
+ *   1) daily s bufferom 60 dní
+ *   2) 1h a 15m od fromTime..toTime
  */
 async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   const exchange = new ccxt.binance({ enableRateLimit: true });
   const limit    = 1000;
 
+  // 60-dňový buffer pre daily
   const dailyBufferMs = 60 * 24 * 60 * 60 * 1000;
   let fromTimeDaily   = 0;
   if (fromTime) {
@@ -95,66 +91,36 @@ async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   console.log(`[LOG] loadTimeframesForBacktest => symbol=${symbol}, fromTime=${tsToISO(fromTime)}, toTime=${tsToISO(toTime)}`);
   console.log(`[LOG] dailyBuffer => fromTimeDaily=${tsToISO(fromTimeDaily)}`);
 
-  // Stiahneme daily
-  const ohlcvDailyAll = await fetchOHLCVInChunks(
-    exchange,
-    symbol,
-    '1d',
-    fromTimeDaily,
-    toTime,
-    limit
-  );
-  // Stiahneme 1h a 15m
-  const ohlcv1hAll = await fetchOHLCVInChunks(
-    exchange,
-    symbol,
-    '1h',
-    fromTime || 0,
-    toTime,
-    limit
-  );
-  const ohlcv15mAll = await fetchOHLCVInChunks(
-    exchange,
-    symbol,
-    '15m',
-    fromTime || 0,
-    toTime,
-    limit
-  );
+  const ohlcvDailyAll = await fetchOHLCVInChunks(exchange, symbol, '1d',  fromTimeDaily, toTime, limit);
+  const ohlcv1hAll    = await fetchOHLCVInChunks(exchange, symbol, '1h',  fromTime || 0, toTime, limit);
+  const ohlcv15mAll   = await fetchOHLCVInChunks(exchange, symbol, '15m', fromTime || 0, toTime, limit);
 
   console.log(`[LOG] => ohlcvDailyAll.length=${ohlcvDailyAll.length}, ohlcv1hAll.length=${ohlcv1hAll.length}, ohlcv15mAll.length=${ohlcv15mAll.length}`);
-  return {
-    ohlcvDailyAll,
-    ohlcv1hAll,
-    ohlcv15mAll
-  };
+  return { ohlcvDailyAll, ohlcv1hAll, ohlcv15mAll };
 }
 
-
-/**
- * GET /backTest => spustenie backtestu (príklad).
- */
+// --------------------------
+// GET /backTest
+// --------------------------
 router.get('/backTest', async (req, res) => {
   try {
-    const symbol = req.query.symbol || 'BTC/USDT';
-    
-    let fromTime = req.query.fromDate ? new Date(req.query.fromDate).getTime() : undefined;
-    let toTime   = req.query.toDate   ? new Date(req.query.toDate).getTime()   : undefined;
+    const symbol = req.query.symbol || 'OG/USDT';
+
+    let fromTime = req.query.fromDate ? (new Date(req.query.fromDate)).getTime() : undefined;
+    let toTime   = req.query.toDate   ? (new Date(req.query.toDate)).getTime()   : undefined;
     if (isNaN(fromTime)) fromTime = undefined;
     if (isNaN(toTime))   toTime   = undefined;
 
-    const hoursToBacktest = req.query.hoursToBacktest
-      ? parseInt(req.query.hoursToBacktest)
-      : 24;
+    const hoursToBacktest = parseInt(req.query.hoursToBacktest || '12');
 
-    // 1) Načítame históriu
-    const {
+    // 1) Načítame daily( s bufferom ), 1h, 15m
+    const { 
       ohlcvDailyAll,
       ohlcv1hAll,
       ohlcv15mAll
     } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
 
-    // 2) Osekáme hour a 15m … 
+    // 2) Odfiltrujeme 1h, 15m tak, aby boli len v [fromTime..toTime]
     let hourDataBacktest = ohlcv1hAll;
     if (fromTime) {
       hourDataBacktest = hourDataBacktest.filter(c => c[0] >= fromTime);
@@ -162,6 +128,7 @@ router.get('/backTest', async (req, res) => {
     if (toTime) {
       hourDataBacktest = hourDataBacktest.filter(c => c[0] <= toTime);
     }
+
     let min15DataBacktest = ohlcv15mAll;
     if (fromTime) {
       min15DataBacktest = min15DataBacktest.filter(c => c[0] >= fromTime);
@@ -171,55 +138,36 @@ router.get('/backTest', async (req, res) => {
     }
 
     const totalHourly = hourDataBacktest.length;
-    console.log(`[LOG] totalHourly (after filter) = ${totalHourly}, hoursToBacktest = ${hoursToBacktest}`);
-
+    console.log(`[LOG] totalHourly(after filter)=${totalHourly}, hoursToBacktest=${hoursToBacktest}`);
     if (totalHourly < hoursToBacktest + 1) {
-      throw new Error(`Not enough hourly data => have ${totalHourly}, needed >= ${hoursToBacktest+1}.`);
+      throw new Error(`Not enough hourly data => we have ${totalHourly}, needed >= ${hoursToBacktest+1}.`);
     }
 
-    console.log(`Hourly range size: ${totalHourly} [${tsToISO(fromTime||0)}..${tsToISO(toTime||Date.now())}]`);
+    console.log(`Hourly range size: ${totalHourly} [${tsToISO(fromTime || 0)}..${tsToISO(toTime || Date.now())}]`);
     console.log(`Daily fetched (with buffer): ${ohlcvDailyAll.length} candle(s).`);
 
-    const results   = [];
-    let runningPnL  = 0;
-
     // 3) Backtest
+    let runningPnL = 0; // TOTO je kumulatívna premená
+    const results  = [];
+
     for (let i = 0; i < hoursToBacktest; i++) {
       const cIndex = totalHourly - (hoursToBacktest + 1) + i;
       if (cIndex + 1 >= totalHourly) break;
 
-      // Hour slice
       const hourDataSlice = hourDataBacktest.slice(0, cIndex + 1);
       const min15Slice    = min15DataBacktest.slice(0, cIndex * 4 + 1);
+      const lastHourTS    = hourDataSlice[hourDataSlice.length - 1][0];
 
-      // lastHourTimestamp
-      const lastHourTimestamp = hourDataSlice[hourDataSlice.length - 1][0];
-      console.log(`[LOG] Iteration #${i}: cIndex=${cIndex}, lastHourTimestamp=${tsToISO(lastHourTimestamp)}`);
+      console.log(`[LOG] iteration#${i}, cIndex=${cIndex}, lastHourTS=${tsToISO(lastHourTS)}`);
 
-      // dailyDataSlice
-      //const dailyDataSlice = ohlcvDailyAll.filter(d => d[0] <= lastHourTimestamp);
-      const dailyDataSliceAll = ohlcvDailyAll.filter(d => d[0] <= lastHourTimestamp);
-      
-      // Odstránime "nedokončenú" daily candle, ak je short
-      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-      const dailyDataSlice = dailyDataSliceAll.filter(c => {
-        return lastHourTimestamp >= c[0] + ONE_DAY_MS;
-      });
-      console.log(`[LOG]   dailyDataSlice.length = ${dailyDataSlice.length}`);
+      // daily: <= lastHourTS a bez "nedokončenej" daily
+      const dailyAll = ohlcvDailyAll.filter(d => d[0] <= lastHourTS);
+      const ONE_DAY_MS = 24*60*60*1000;
+      const dailyDataSlice = dailyAll.filter(c => lastHourTS >= c[0] + ONE_DAY_MS);
+
+      console.log(`[LOG]   dailyDataSlice.length=${dailyDataSlice.length}`);
       if (dailyDataSlice.length < 2) {
-        throw new Error(`Iteration #${i}: Not enough daily data => only ${dailyDataSlice.length}. Possibly partial daily candle.`);
-      }
-      if (dailyDataSlice.length > 0) {
-        console.log(`[LOG]   dailyDataSlice.first=${tsToISO(dailyDataSlice[0][0])}, dailyDataSlice.last=${tsToISO(dailyDataSlice[dailyDataSlice.length - 1][0])}`);
-      }
-      // Voliteľne vypíšte detail každého daily candle:
-      // dailyDataSlice.forEach((dc, idx) => {
-      //   console.log(`[LOG]    #${idx}: ts=${tsToISO(dc[0])}, close=${dc[4]}`);
-      // });
-
-      // => tu, ak je dailyDataSlice < 2 => Error
-      if (dailyDataSlice.length < 2) {
-        throw new Error(`Iteration #${i}: Not enough daily data => only ${dailyDataSlice.length}.`);
+        throw new Error(`Iteration #${i}: Not enough daily data => only ${dailyDataSlice.length}`);
       }
 
       // GPT analýza
@@ -229,36 +177,37 @@ router.get('/backTest', async (req, res) => {
         min15Slice,
         hourDataSlice
       );
-      const finalAction = analysis.gptOutput.final_action || 'HOLD';
+      const synergy = analysis.gptOutput || {};
+      console.log(`[LOG] synergyParsed =>`, synergy);
 
-      // PnL
-      const nextOHLC   = hourDataBacktest[cIndex + 1];
-      const openPrice  = nextOHLC[1];
-      const highPrice  = nextOHLC[2];
-      const lowPrice   = nextOHLC[3];
-      const closePrice = nextOHLC[4];
-      const atr        = analysis.tf1h.lastATR || 0;
-      const stopMult   = 2;
+      // Ak GPT povie SELL => reálne SELL
+      let finalAction = synergy.final_action || 'HOLD';
 
-      let tradePnL = 0;
-      if (finalAction === 'BUY') {
-        const stopPrice = openPrice - stopMult * atr;
-        if (lowPrice <= stopPrice) {
-          tradePnL = stopPrice - openPrice;
-        } else {
-          tradePnL = closePrice - openPrice;
-        }
-      } else if (finalAction === 'SELL') {
-        const stopPrice = openPrice + stopMult * atr;
-        if (highPrice >= stopPrice) {
-          tradePnL = openPrice - stopPrice;
-        } else {
-          tradePnL = openPrice - closePrice;
-        }
+      // 4) PnL => v percentách voči openPrice (ukážka)
+      const nextCandle = hourDataBacktest[cIndex + 1];
+      const openPrice  = nextCandle[1];
+      const highPrice  = nextCandle[2];
+      const lowPrice   = nextCandle[3];
+      const closePrice = nextCandle[4];
+
+      // Čiarkový vs. bodkový formát atď. => V kóde je to reálne číslo
+      let tradePnL = 0; // tentokrát len percentuálny
+      if (finalAction==='BUY') {
+        const percentMove = ((closePrice - openPrice) / openPrice) * 100;
+        tradePnL = percentMove;
       }
+      else if (finalAction==='SELL') {
+        // Sell => short => ak close < open => +zisk, iné => -zisk
+        const percentMove = ((openPrice - closePrice) / openPrice) * 100;
+        tradePnL = percentMove;
+      }
+      else {
+        tradePnL = 0; // HOLD
+      }
+
       runningPnL += tradePnL;
 
-      console.log(`[LOG]   finalAction=${finalAction}, open=${openPrice.toFixed(2)}, close=${closePrice.toFixed(2)}, tradePnL=${tradePnL.toFixed(4)}, runningPnL=${runningPnL.toFixed(4)}`);
+      console.log(`[LOG]   finalActionUsed=${finalAction}, open=${openPrice.toFixed(3)}, close=${closePrice.toFixed(3)}, tradePnLPercent=${tradePnL.toFixed(3)}%, runningPnL=${runningPnL.toFixed(3)}%`);
 
       results.push({
         iteration: i,
@@ -266,19 +215,21 @@ router.get('/backTest', async (req, res) => {
         finalAction,
         openPrice,
         closePrice,
-        tradePnL,
-        runningPnL
+        tradePnLPercent: tradePnL,
+        runningPnLPercent: runningPnL
       });
     }
 
-    console.log('[LOG] Final PnL = ', runningPnL.toFixed(4));
-    return res.json({ success: true, finalPnL: runningPnL, detail: results });
-  } catch (err) {
-    console.error('Error in simulation:', err);
-    return res.status(500).json({
-      success: false,
-      error: err.message
+    console.log('[LOG] Final PnL(%)=', runningPnL.toFixed(3));
+    return res.json({
+      success: true,
+      finalPnLPercent: runningPnL,
+      detail: results
     });
+
+  } catch(err) {
+    console.error('[ERROR in /backTest]', err);
+    return res.status(500).json({ success:false, error: err.message });
   }
 });
 

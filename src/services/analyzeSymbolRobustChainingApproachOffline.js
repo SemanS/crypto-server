@@ -2,8 +2,11 @@ const OpenAI = require('openai');
 const {
   offlineDailyStats,
   offlineIndicatorsForTimeframe
-} = require('./offlineIndicators'); // súbor s offlineDailyStats a offlineIndicatorsForTimeframe
+} = require('./offlineIndicators');
 
+/** 
+ * Rýchle generovanie daily prompt a synergy prompt 
+ */
 function buildDailyPromptOffline(symbol, dailyStats) {
   const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
   return `
@@ -16,49 +19,6 @@ Please give me a "macro_view": "BULLISH" or "BEARISH" or "NEUTRAL" and a reason.
   "macro_comment": "..."
 }
 (No extra text.)
-`;
-}
-
-function buildIndicatorSummaryOffline(tfData) {
-  if (!tfData) return 'N/A tfData';
-
-  const {
-    timeframe,
-    lastClose,
-    lastRSI,
-    lastMACD,
-    lastSMA20,
-    lastEMA50,
-    lastBoll,
-    lastADX,
-    lastStochastic,
-    lastATR,
-    lastMFI,
-    lastOBV
-  } = tfData;
-
-  const macdStr = lastMACD
-    ? `MACD=${lastMACD.MACD?.toFixed(2)}, signal=${lastMACD.signal?.toFixed(2)}, hist=${lastMACD.histogram?.toFixed(2)}`
-    : 'N/A';
-  const bollStr = lastBoll
-    ? `BollLower=${lastBoll.lower?.toFixed(2)}, mid=${lastBoll.mid?.toFixed(2)}, upper=${lastBoll.upper?.toFixed(2)}`
-    : 'N/A';
-  const adxStr  = lastADX
-    ? `ADX=${lastADX.adx?.toFixed(2)}, +DI=${lastADX.pdi?.toFixed(2)}, -DI=${lastADX.mdi?.toFixed(2)}`
-    : 'N/A';
-
-  return `
-timeframe=${timeframe}, close=${lastClose?.toFixed(4)}
-RSI(14)=${lastRSI?.toFixed(2)}
-${macdStr}
-SMA20=${lastSMA20?.toFixed(4)}
-EMA50=${lastEMA50?.toFixed(4)}
-${bollStr}
-${adxStr}
-Stoch=${lastStochastic? `K=${lastStochastic.k?.toFixed(2)},D=${lastStochastic.d?.toFixed(2)}` : 'N/A'}
-ATR=${lastATR?.toFixed(4)}
-MFI=${lastMFI?.toFixed(2)}
-OBV=${lastOBV?.toFixed(2)}
 `;
 }
 
@@ -88,105 +48,121 @@ Combine them. Return JSON:
 `;
 }
 
+function buildIndicatorSummaryOffline(tfData) {
+  if (!tfData) return 'N/A tfData';
+  const {
+    timeframe,
+    lastClose, lastRSI, lastMACD, lastSMA20, lastEMA50,
+    lastBoll, lastADX, lastStochastic, lastATR, lastMFI, lastOBV
+  } = tfData;
+
+  const macdStr = lastMACD
+    ? `MACD=${lastMACD.MACD?.toFixed(2)}, signal=${lastMACD.signal?.toFixed(2)}, hist=${lastMACD.histogram?.toFixed(2)}`
+    : 'N/A';
+  const bollStr = lastBoll
+    ? `BollLower=${lastBoll.lower?.toFixed(2)}, mid=${lastBoll.mid?.toFixed(2)}, upper=${lastBoll.upper?.toFixed(2)}`
+    : 'N/A';
+  const adxStr  = lastADX
+    ? `ADX=${lastADX.adx?.toFixed(2)}, +DI=${lastADX.pdi?.toFixed(2)}, -DI=${lastADX.mdi?.toFixed(2)}`
+    : 'N/A';
+
+  return `
+timeframe=${timeframe}, close=${lastClose?.toFixed(4)}
+RSI(14)=${lastRSI?.toFixed(2)}
+${macdStr}
+SMA20=${lastSMA20?.toFixed(4)}
+EMA50=${lastEMA50?.toFixed(4)}
+${bollStr}
+${adxStr}
+Stoch=${lastStochastic? `K=${lastStochastic.k?.toFixed(2)},D=${lastStochastic.d?.toFixed(2)}` : 'N/A'}
+ATR=${lastATR?.toFixed(4)}
+MFI=${lastMFI?.toFixed(2)}
+OBV=${lastOBV?.toFixed(2)}
+`;
+}
+
+/**
+ * analyzeSymbolRobustChainingApproachOffline:
+ *  - spočíta dailyStats, 1h, 15m
+ *  - GPT daily => macro
+ *  - GPT synergy => short term
+ *  - NEOVERRIDE final_action => vrátime tak, ako GPT prikázala.
+ */
 async function analyzeSymbolRobustChainingApproachOffline(
   symbol,
   dailyDataSlice,
   min15DataSlice,
   hourDataSlice
 ) {
-  // 1) Získame štatistiky z daily timeframe (už nemá throw Error, ale fallback).
+  // 1) dailyStats
   let dailyStats;
   try {
     dailyStats = offlineDailyStats(dailyDataSlice);
   } catch (err) {
-    // Tu vyslovene logneme, prečo offlineDailyStats padol
-    console.error('[LOG:analyzeSymbolOffline] offlineDailyStats threw error:', err.message);
-    console.warn('Skipping daily GPT macro analysis due to insufficient daily data (or invalid daily data).');
-    // Vraceame fallback => GPT macro = NEUTRAL
+    console.error('[LOG:analyzeSymbolOffline] offlineDailyStats error:', err.message);
+    // Fallback => hold
     return {
-      gptOutput: {
-        final_action: 'HOLD',
-        comment: 'Skipped daily macro due to insufficient daily data.'
-      },
-      tf15m: null,
-      tf1h:  null,
-      tfDailyStats: null
+      gptOutput: { final_action:'HOLD', comment:'Insufficient daily data => skip macro.' },
+      tf15m: null, tf1h: null, tfDailyStats: null
     };
   }
 
-  // 2) Ak je dailyStats.hasEnoughData=true, vyrobíme dailyPrompt a pošleme GPT.
-  let dailyParsed = { macro_view: 'NEUTRAL', macro_comment: 'N/A' };
-
+  // 2) GPT #1 => daily macro
+  let dailyParsed = { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
+  try {
+    const dailyPrompt = buildDailyPromptOffline(symbol, dailyStats);
     const openAiClient = new OpenAI({
       organization: process.env.OPENAI_ORGANIZATION,
       apiKey: process.env.OPENAI_API_KEY
     });
+    const resp1 = await openAiClient.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: dailyPrompt }]
+    });
+    let raw1 = resp1.choices[0]?.message?.content || '';
+    raw1 = raw1.replace(/```(\w+)?/g, '').trim();
+    dailyParsed = JSON.parse(raw1);
+  } catch (e) {
+    console.warn("GPT offline macro daily parse error:", e.message);
+  }
 
-    const dailyPrompt = buildDailyPromptOffline(symbol, dailyStats);
-
-    try {
-      const resp1 = await openAiClient.chat.completions.create({
-        messages: [{ role: 'user', content: dailyPrompt }],
-        model: 'gpt-4o', // príklad, upravte podľa potreby
-      });
-      let raw1 = resp1.choices[0]?.message?.content || '';
-      raw1     = raw1.replace(/```(\w+)?/g, '').trim();
-
-      dailyParsed = JSON.parse(raw1);
-    } catch (e) {
-      console.warn("GPT offline macro daily parse error:", e.message);
-    }
-
-  // 3) Spočítame 15m a 1h indikátory
+  // 3) 15m, 1h indicators
   const tf15m = offlineIndicatorsForTimeframe(min15DataSlice, '15m');
   const tf1h  = offlineIndicatorsForTimeframe(hourDataSlice, '1h');
 
-  // 4) GPT #2 => synergy (krátkodobé)
+  // 4) GPT #2 => synergy
   let synergyParsed = null;
   try {
+    const synergyPrompt = buildShortPromptOffline(symbol, dailyParsed, tf15m, tf1h);
     const openAiClient = new OpenAI({
       organization: process.env.OPENAI_ORGANIZATION,
       apiKey: process.env.OPENAI_API_KEY
     });
-    const synergyPrompt = buildShortPromptOffline(symbol, dailyParsed, tf15m, tf1h);
-
     const resp2 = await openAiClient.chat.completions.create({
-      messages: [{ role: 'user', content: synergyPrompt }],
       model: 'gpt-4o',
+      messages: [{ role: 'user', content: synergyPrompt }]
     });
     let raw2 = resp2.choices[0]?.message?.content || '';
-    raw2     = raw2.replace(/```(\w+)?/g, '').trim();
+    raw2 = raw2.replace(/```(\w+)?/g, '').trim();
     synergyParsed = JSON.parse(raw2);
-    console.log("synergyParsed", synergyParsed);
+    console.log("[LOG synergy] synergyParsed =>", synergyParsed);
   } catch (e) {
     console.warn("GPT offline synergy parse error:", e.message);
   }
 
-  // Spracovanie "final_action"
-  let final_action = 'HOLD';
-  let comment = '';
-  if (synergyParsed && synergyParsed.final_action) {
-    final_action = synergyParsed.final_action;
-    comment = synergyParsed.comment || '';
+  // V minulom kóde sme prepisovali SELL->HOLD ak synergyAvg<0.6
+  // -> to spôsobovalo 0 PnL. Teraz to NEROBÍME => vrátime final_action priamo z synergy.
 
-    // Filtrovanie slabých signálov
-    const techStr = synergyParsed.technical_signal_strength || 0;
-    const fundStr = synergyParsed.fundamental_signal_strength || 0;
-    const sentStr = synergyParsed.sentiment_signal_strength || 0;
-    const avgStr  = (techStr + fundStr + sentStr) / 3;
+  let final_action = synergyParsed?.final_action || 'HOLD';
+  let comment      = synergyParsed?.comment || '';
 
-    // Pod prahom 0.6 prepíšeme na HOLD
-    if (avgStr < 0.6) {
-      final_action = 'HOLD';
-      comment += " [Signal overridden to HOLD due to low synergy score]";
-    }
-  }
-
-  // Výstup
   return {
     gptOutput: {
       final_action,
-      comment
+      comment,
+      technical_signal_strength: synergyParsed?.technical_signal_strength || 0,
+      fundamental_signal_strength: synergyParsed?.fundamental_signal_strength || 0,
+      sentiment_signal_strength: synergyParsed?.sentiment_signal_strength || 0
     },
     tf15m,
     tf1h,
