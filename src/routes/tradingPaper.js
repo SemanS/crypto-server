@@ -191,7 +191,6 @@ router.post('/startPaperTrade', async (req, res) => {
     const exchange = new ccxt.binance({ enableRateLimit: true });
     const ticker = await exchange.fetchTicker(symbol);
     const lastPrice = ticker.last;
-    console.log('Ticker data:', ticker);
 
     if (!lastPrice) {
       return res.status(500).json({ error: `Nepodarilo sa získať cenu pre symbol ${symbol}` });
