@@ -189,7 +189,8 @@ router.post('/startPaperTrade', async (req, res) => {
     }
 
     const exchange = new ccxt.binance({ enableRateLimit: true });
-    const ticker = await exchange.fetchTicker(symbol);
+    const ticker = await exchange.fetchTicker("BSV/USDT");
+    console.log("s" + JSON.stringify(ticker))
     const lastPrice = ticker.last;
 
     if (!lastPrice) {
