@@ -152,7 +152,7 @@ async function analyzeSymbolRobustChainingApproachOffline(
     });
     console.log("[LOG] dailyPrompt =>", dailyPrompt);
     const resp1 = await openAiClient.chat.completions.create({
-      model: 'o1-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: dailyPrompt }]
     });
     let raw1 = resp1.choices[0]?.message?.content || '';
@@ -183,7 +183,7 @@ async function analyzeSymbolRobustChainingApproachOffline(
       });
       console.log("[LOG] weeklyPrompt =>", weeklyPrompt);
       const resp2 = await openAiClient.chat.completions.create({
-        model: 'o1-preview',
+        model: 'gpt-4o',
         messages: [{ role: 'user', content: weeklyPrompt }]
       });
       let raw2 = resp2.choices[0]?.message?.content || '';
@@ -223,7 +223,7 @@ async function analyzeSymbolRobustChainingApproachOffline(
     });
     console.log("[LOG synergyPrompt] =>", synergyPrompt);
     const resp3 = await openAiClient.chat.completions.create({
-      model: 'o1-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: synergyPrompt }]
     });
 

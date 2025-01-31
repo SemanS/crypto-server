@@ -1,7 +1,8 @@
 const express = require('express');
-const router = express.Router();
+const router = express.Router(); // Fix small typo here
 const ccxt = require('ccxt');
 const { analyzeSymbolRobustChainingApproachOffline } = require('./analyzeSymbolRobustChainingApproachOffline');
+const { loadTimeframesForBacktest } = require('../services/loadTimeframesForBacktest');
 
 // Pomocné funkcie
 function tsToISO(ts) {
@@ -86,7 +87,7 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
  * loadTimeframesForBacktest:
  *  - Warm-up 60 dní pre indikátory
  */
-async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
+/* async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   const exchange = new ccxt.binance({ enableRateLimit: true });
   const limit    = 1000;
 
@@ -108,7 +109,7 @@ async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
 
   console.log(`[LOG] => daily=${ohlcvDailyAll.length}, weekly=${ohlcvWeeklyAll.length}, 1h=${ohlcv1hAll.length}, 15m=${ohlcv15mAll.length}, 1m=${ohlcv1mAll.length}`);
   return { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv1mAll };
-}
+} */
 
 // ------------------------------------------------------------------------
 // /backTest endpoint
@@ -155,9 +156,37 @@ router.get('/backTest', async (req, res) => {
 
     console.log(`[LOG] fromIndex=${fromIndex}, hourDataBacktest[fromIndex]=${tsToISO(hourDataBacktest[fromIndex][0])}`);
 
+    // ---------------------------
+    // NASTAVENIA OBCHODOVANIA
+    // ---------------------------
+    // BUY -> stopLoss = -5% => openPrice * 0.95
+    // BUY -> takeProfit = +10% => openPrice * 1.10
+    //
+    // (Pre SELL použijeme inverznú logiku)
+    // SELL -> stopLoss = openPrice / 0.95
+    // SELL -> takeProfit = openPrice / 1.10
+    // ---------------------------
+    const stopLossThreshold = 0.95;   // -5% pre BUY
+    const takeProfitGain    = 1.10;   // +10% pre BUY
+
     let runningPnL = 0;
     const results  = [];
-    const stopLossThreshold = 0.95; // -5%
+
+    // Držíme si stav otvorenej pozície (ak nejaká je)
+    let positionOpen      = false;
+    let positionDirection = null;  // 'BUY' / 'SELL'
+    let positionOpenPrice = 0;
+    let positionOpenTime  = 0;    // optional, if needed
+
+    // Malá funkcia na výpočet PnL v %
+    function computePnL(direction, openP, closeP) {
+      if (direction === 'BUY') {
+        return ((closeP - openP) / openP) * 100;
+      } else if (direction === 'SELL') {
+        return ((openP - closeP) / openP) * 100;
+      }
+      return 0;
+    }
 
     // 4) Spustíme backtest po jednotlivých hodinách
     for (let i = 0; i < hoursToBacktest; i++) {
@@ -168,7 +197,7 @@ router.get('/backTest', async (req, res) => {
       const lastHourTS = hourCandle[0]; // začiatok hour sviečky
       console.log(`[LOG] iteration=${i}, cIndex=${cIndex}, lastHourTS=${tsToISO(lastHourTS)}`);
 
-      // hourDataSlice: všetky Hour sviečky do cIndex
+      // hourDataSlice: všetky Hour sviečky do cIndex (vrátane)
       const hourDataSlice = hourDataBacktest.slice(0, cIndex + 1);
       // min15Slice <= lastHourTS
       const min15Slice    = min15DataBacktest.filter(m => m[0] + timeframeToMs('15m') <= lastHourTS);
@@ -183,7 +212,7 @@ router.get('/backTest', async (req, res) => {
       const dailyDataSlice  = dailyAll.filter(c => lastHourTS >= c[0] + ONE_DAY_MS);
       const weeklyDataSlice = weeklyAll.filter(c => lastHourTS >= c[0] + ONE_WEEK_MS);
 
-      // 4A) GPT analýza
+      // GPT analýza
       const analysis = await analyzeSymbolRobustChainingApproachOffline(
         symbol,
         dailyDataSlice,
@@ -194,98 +223,167 @@ router.get('/backTest', async (req, res) => {
       const synergy = analysis.gptOutput || {};
       const finalAction = synergy.final_action || 'HOLD';
 
-      // 4B) Cena otvorenia => 1h candle končí v openTime
-      const openTime = lastHourTS + timeframeToMs('1h');
-      const openPrice = find1mClosePriceAtTime(min1DataBacktest, openTime);
-      if (openPrice === null) {
-        console.log(`[LOG]   No 1m candle found for openTime=${tsToISO(openTime)} => break`);
-        break;
+      // -----------------------------------------------------------------
+      // 1) Otvorenie novej pozície, ak žiadna nie je otvorená
+      // -----------------------------------------------------------------
+      if (!positionOpen && (finalAction === 'BUY' || finalAction === 'SELL')) {
+        // Cena otvorenia je na konci tejto hour sviečky:
+        // t.j. openTime = lastHourTS + 1h
+        const openTime  = lastHourTS + timeframeToMs('1h');
+        const openPrice = find1mClosePriceAtTime(min1DataBacktest, openTime);
+        if (openPrice !== null) {
+          positionOpen      = true;
+          positionDirection = finalAction; // 'BUY' alebo 'SELL'
+          positionOpenPrice = openPrice;
+          positionOpenTime  = openTime;
+          console.log(`[LOG] >>> Opened ${positionDirection} at ${openPrice} (time=${tsToISO(openTime)})`);
+        }
       }
 
-      // 4C) Uzavretie (s kontrolou stop-lossu -5%)
-      let closePrice;
-      const closeTime = openTime + timeframeToMs('1h');
+      // -----------------------------------------------------------------
+      // 2) Ak už je pozícia otvorená, skontrolujeme 1m dáta v rámci tejto hodiny
+      //    a logujeme priebežný PnL pre každú 1m sviečku.
+      // -----------------------------------------------------------------
+      if (positionOpen) {
+        const hourStart = lastHourTS;
+        const hourEnd   = hourStart + timeframeToMs('1h');
 
-      if (finalAction === 'HOLD') {
-        // neotvárame žiadny obchod => PnL = 0
-        closePrice = openPrice;
-      } else {
-        // BUY alebo SELL => skontrolujeme 1m sviečky
-        let tradeClosed = false;
-        let lastSeenPrice = openPrice;
-
-        // Pre BUY: ak cena klesne o 5% => stopLossPrice = 0.95 * openPrice
-        // Pre SELL: ak cena stúpne o 5% => stopLossPrice = openPrice / 0.95
-        const stopLossPrice = (finalAction === 'BUY')
-          ? openPrice * stopLossThreshold
-          : openPrice / stopLossThreshold;
-
-        // 1m sviečky v rozmedzí [openTime, closeTime)
         const oneMinCandlesInHour = min1DataBacktest
-          .filter(c => c[0] >= openTime && c[0] < closeTime)
+          .filter(c => c[0] >= hourStart && c[0] < hourEnd)
           .sort((a, b) => a[0] - b[0]);
 
-        for (const c of oneMinCandlesInHour) {
-          // c: [ ts, open, high, low, close, volume ]
-          const candleLow  = c[3];
-          const candleHigh = c[2];
-          const candleClose= c[4];
-          lastSeenPrice    = candleClose;
+        let positionStillOpen = true;
+        let closeTradePrice   = null;
+        let closeTradeTime    = null;
 
-          if (finalAction === 'BUY') {
-            // ak minima <= stopLossPrice => triggered
-            if (candleLow <= stopLossPrice) {
-              closePrice = stopLossPrice;
-              tradeClosed = true;
+        // Podľa direction nastavíme SL/TP
+        let slPrice = 0;
+        let tpPrice = 0;
+
+        if (positionDirection === 'BUY') {
+          slPrice = positionOpenPrice * stopLossThreshold;  // -5%
+          tpPrice = positionOpenPrice * takeProfitGain;     // +10%
+        } else {
+          // SELL => inverzná logika
+          slPrice = positionOpenPrice / stopLossThreshold;  // openPrice / 0.95
+          tpPrice = positionOpenPrice / takeProfitGain;     // openPrice / 1.10
+        }
+
+        for (const candle of oneMinCandlesInHour) {
+          const candleTS    = candle[0];
+          const candleHigh  = candle[2];
+          const candleLow   = candle[3];
+          const candleClose = candle[4]; // close
+          
+          // 2A) Log priebežný PnL s aktuálnou cenou, ak je pozícia otvorená
+          const currentPnL = computePnL(positionDirection, positionOpenPrice, candleClose);
+          console.log(
+            `[LOG]   1m Candle @${tsToISO(candleTS)} => Current Price=${candleClose}, partialPnL=${currentPnL.toFixed(2)}%`
+          );
+
+          // 2B) Skontrolujeme SL/TP
+          if (positionDirection === 'BUY') {
+            if (candleLow <= slPrice) {
+              // dosiahol sa stop-loss
+              closeTradePrice = slPrice;
+              closeTradeTime  = candleTS;
+              positionStillOpen = false;
+              break;
+            }
+            if (candleHigh >= tpPrice) {
+              // dosiahol sa take-profit
+              closeTradePrice = tpPrice;
+              closeTradeTime  = candleTS;
+              positionStillOpen = false;
               break;
             }
           } else {
-            // SELL => ak maxima >= stopLossPrice => triggered
-            if (candleHigh >= stopLossPrice) {
-              closePrice = stopLossPrice;
-              tradeClosed = true;
+            // SELL
+            if (candleHigh >= slPrice) {
+              // stop-loss
+              closeTradePrice = slPrice;
+              closeTradeTime  = candleTS;
+              positionStillOpen = false;
+              break;
+            }
+            if (candleLow <= tpPrice) {
+              // take-profit
+              closeTradePrice = tpPrice;
+              closeTradeTime  = candleTS;
+              positionStillOpen = false;
               break;
             }
           }
         }
 
-        if (!tradeClosed) {
-          // Stoploss sa nespustil => zatvoríme na konci hodiny
-          closePrice = find1mClosePriceAtTime(min1DataBacktest, closeTime);
-          if (closePrice === null) {
-            console.log(`[LOG]   No 1m candle found for closeTime=${tsToISO(closeTime)} => break`);
-            break;
-          }
+        // Ak v tejto hodine došlo k SL/TP, zatvoríme obchod
+        if (!positionStillOpen) {
+          const tradePnL = computePnL(positionDirection, positionOpenPrice, closeTradePrice);
+          runningPnL += tradePnL;
+
+          results.push({
+            iteration: i,
+            cIndex,
+            lastHourTS,
+            closeAtTS: closeTradeTime,
+            direction: positionDirection,
+            openPrice: positionOpenPrice,
+            closePrice: closeTradePrice,
+            tradePnLPercent: tradePnL,
+            runningPnLPercent: runningPnL
+          });
+
+          console.log(
+            `[LOG]   >>> CLOSED ${positionDirection} @ ${closeTradePrice} (time=${tsToISO(closeTradeTime)}), ` +
+            `PnL=${tradePnL.toFixed(2)}%, runningPnL=${runningPnL.toFixed(2)}%`
+          );
+
+          // Reset pozície
+          positionOpen      = false;
+          positionDirection = null;
+          positionOpenPrice = 0;
+          positionOpenTime  = null;
+        }
+        // Ak sa SL/TP nedosiahol, držíme pozíciu ďalej a v ďalšej hodine znova kontrolujeme
+      }
+    }
+
+    // 5) Ak po skončení loopu ešte ostala pozícia otvorená, uzavrieme ju za poslednú dostupnú cenu (voliteľné)
+    if (positionOpen) {
+      const lastHourIndex = fromIndex + hoursToBacktest - 1;
+      const lastHourCandle = hourDataBacktest[lastHourIndex];
+      let finalClosePrice = positionOpenPrice;
+
+      if (lastHourCandle) {
+        const theoreticalCloseTime = lastHourCandle[0] + timeframeToMs('1h');
+        const foundPrice = find1mClosePriceAtTime(min1DataBacktest, theoreticalCloseTime);
+        if (foundPrice !== null) {
+          finalClosePrice = foundPrice;
         }
       }
 
-      // 4D) Výpočet PnL
-      let tradePnL = 0;
-      if (finalAction === 'BUY') {
-        tradePnL = ((closePrice - openPrice) / openPrice) * 100;
-      } else if (finalAction === 'SELL') {
-        tradePnL = ((openPrice - closePrice) / openPrice) * 100;
-      } // HOLD => 0
-
-      runningPnL += tradePnL;
-      console.log(`[LOG]   finalAction=${finalAction}, open=${openPrice}, close=${closePrice}, tradePnL=${tradePnL.toFixed(3)}%, runningPnL=${runningPnL.toFixed(3)}%`);
+      const finalTradePnL = computePnL(positionDirection, positionOpenPrice, finalClosePrice);
+      runningPnL += finalTradePnL;
 
       results.push({
-        iteration: i,
-        cIndex,
-        lastHourTS,
-        openTime,
-        closeTime,
-        finalAction,
-        openPrice,
-        closePrice,
-        tradePnLPercent: tradePnL,
+        iteration:  hoursToBacktest,
+        cIndex:     lastHourIndex,
+        closeAtTS:  Date.now(),
+        direction:  positionDirection,
+        openPrice:  positionOpenPrice,
+        closePrice: finalClosePrice,
+        tradePnLPercent: finalTradePnL,
         runningPnLPercent: runningPnL
       });
+
+      console.log(
+        `[LOG] Forced close final position with PnL=${finalTradePnL.toFixed(2)}% -> runningPnL=${runningPnL.toFixed(2)}%`
+      );
     }
 
     console.log('[LOG] Final PnL(%) =', runningPnL.toFixed(3));
 
+    // Return JSON response
     return res.json({
       success: true,
       finalPnLPercent: runningPnL,

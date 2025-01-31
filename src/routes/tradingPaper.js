@@ -7,7 +7,9 @@ const { analyzeSymbolMultiTF } = require('../analysis/analyzeSymbolMultiTF');
 const { analyzeSymbolComprehensiveApproach } = require('../analysis/analyzeSymbolComprehensiveApproach');
 const { analyzeSymbolResearchApproach } = require('../analysis/analyzeSymbolResearchApproach');
 const { analyzeSymbolRobustChainingApproach } = require('../analysis/analyzeSymbolRobustChainingApproach');
+const { analyzeSymbolRobustChainingApproachOffline } = require('../services/analyzeSymbolRobustChainingApproachOffline');
 const { simulate } = require('../services/simulation');
+const { loadTimeframesForBacktest } = require('../services/loadTimeframesForBacktest');
 // V pamäti držíme simulované obchody (paper trades)
 const paperTrades = {};
 
@@ -189,8 +191,7 @@ router.post('/startPaperTrade', async (req, res) => {
     }
 
     const exchange = new ccxt.binance({ enableRateLimit: true });
-    const ticker = await exchange.fetchTicker("BSV/USDT");
-    console.log("s" + JSON.stringify(ticker))
+    const ticker = await exchange.fetchTicker(symbol);
     const lastPrice = ticker.last;
 
     if (!lastPrice) {
@@ -375,6 +376,117 @@ router.get('/simulation', async (req, res) => {
   } catch (err) {
     console.error('Chyba pri simulácii:', err);
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
+  const exchange = new ccxt.binance({ enableRateLimit: true });
+  await exchange.loadMarkets();
+
+  // If fromTime / toTime are undefined, you can supply defaults.
+  // For demonstration, just fetch a limited set of 200 candles each:
+  const ohlcvHour   = await exchange.fetchOHLCV(symbol, '1h',   fromTime, 200);
+  const ohlcvDaily  = await exchange.fetchOHLCV(symbol, '1d',   fromTime, 200);
+  const ohlcvWeekly = await exchange.fetchOHLCV(symbol, '1w',   fromTime, 200);
+  const ohlcv15m    = await exchange.fetchOHLCV(symbol, '15m',  fromTime, 200);
+  const ohlcv1m     = await exchange.fetchOHLCV(symbol, '1m',   fromTime, 200);
+
+  // If you want to filter by toTime, you can do so in your arrays.
+  // Example, filter candles up to toTime:
+  function filterToEnd(data) {
+    if (!toTime) return data;
+    return data.filter(c => c[0] <= toTime);
+  }
+
+  return {
+    ohlcvDailyAll:  filterToEnd(ohlcvDaily),
+    ohlcvWeeklyAll: filterToEnd(ohlcvWeekly),
+    ohlcv1hAll:     filterToEnd(ohlcvHour),
+    ohlcv15mAll:    filterToEnd(ohlcv15m),
+    ohlcv1mAll:     filterToEnd(ohlcv1m)
+  };
+} */
+
+router.get('/directAnalysis', async (req, res) => {
+  try {
+    const symbol       = req.query.symbol       || 'BTC/USDT';
+    const approach     = req.query.approach     || 'robust';
+    const analysisMode = req.query.analysisMode || 'actual';
+
+    // Parse fromDate / toDate (e.g. "2023-09-01T10:30")
+    let fromTime = undefined;
+    let toTime   = undefined;
+
+    if (req.query.fromDate) {
+      const d = new Date(req.query.fromDate);
+      if (!isNaN(d.getTime())) {
+        fromTime = d.getTime();
+      }
+    }
+    if (req.query.toDate) {
+      const d2 = new Date(req.query.toDate);
+      if (!isNaN(d2.getTime())) {
+        toTime = d2.getTime();
+      }
+    }
+
+    if (analysisMode === 'actual') {
+      // 1) "Actual" mode => real-time data
+      const exchange = new ccxt.binance({ enableRateLimit: true });
+      await exchange.loadMarkets();
+
+      const reevalData = await analyzeSymbolRobustChainingApproach(exchange, symbol);
+
+      return res.json({
+        success: true,
+        symbol,
+        approach,
+        analysisMode: 'actual',
+        finalAction:  reevalData.gptOutput?.final_action || 'HOLD',
+        commentGPT:   reevalData.gptOutput?.comment      || '(no comment)',
+        synergy:      reevalData.gptOutput
+      });
+    } else {
+      // 2) "Historical" mode => offline approach
+      const {
+        ohlcvDailyAll,
+        ohlcvWeeklyAll,
+        ohlcv1hAll,
+        ohlcv15mAll,
+        ohlcv1mAll
+      } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
+
+      const reevalData = await analyzeSymbolRobustChainingApproachOffline(
+        symbol,
+        ohlcvDailyAll,
+        ohlcvWeeklyAll,
+        ohlcv15mAll,
+        ohlcv1hAll
+        // ... plus 1m if your function references it, etc.
+      );
+
+      return res.json({
+        success: true,
+        symbol,
+        approach,
+        analysisMode: 'historical',
+        fromTime,
+        toTime,
+        finalAction: reevalData.gptOutput?.final_action || 'HOLD',
+        commentGPT:  reevalData.gptOutput?.comment      || '(no comment)',
+        synergy:     reevalData.gptOutput,
+        candleCounts: {
+          daily:  ohlcvDailyAll.length,
+          weekly: ohlcvWeeklyAll.length,
+          hour:   ohlcv1hAll.length,
+          m15:    ohlcv15mAll.length,
+          m1:     ohlcv1mAll.length
+        }
+      });
+    }
+  } catch (err) {
+    console.error("Chyba /directAnalysis:", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
