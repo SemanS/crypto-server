@@ -81,13 +81,43 @@ OBV=${lastOBV?.toFixed(2)}
  * Nová finálna synergia, ktorá zohľadní daily aj weekly makro a krátkodobé časové rámce.
  * Zadefinujeme váhy: daily = 30%, weekly = 40%, short-term(15m+1h) = 30%
  */
-function buildFinalSynergyPromptOffline(symbol, dailyMacro, weeklyMacro, tf15m, tf1h) {
+function buildFinalSynergyPromptOffline(
+  symbol,
+  dailyMacro,
+  weeklyMacro,
+  tf15m,
+  tf1h,
+  fromTime,
+  toTime,
+  fundamentals) {
   const dailySummary = `macro_view=${dailyMacro.macro_view}, reason=${dailyMacro.macro_comment}`;
   const weeklySummary = `weekly_view=${weeklyMacro.weekly_view}, reason=${weeklyMacro.weekly_comment}`;
 
   const sum15m = buildIndicatorSummaryOffline(tf15m);
   const sum1h  = buildIndicatorSummaryOffline(tf1h);
 
+  function formatTS(ts) {
+    return new Date(ts).toISOString().slice(0, 16).replace('T', ' ');
+  }
+
+    // Show date range if provided
+    let dateRangeText = '';
+    if (fromTime || toTime) {
+      const fromTxt = fromTime ? formatTS(fromTime) : 'N/A';
+      const toTxt   = toTime   ? formatTS(toTime)   : 'N/A';
+      dateRangeText = `Offline data timeframe: from ${fromTxt} to ${toTxt}.\n`;
+    }
+
+    let fundamentalsText = '';
+    if (fundamentals && fundamentals.articles && fundamentals.articles.length > 0) {
+      fundamentalsText += `Here are some fundamental/news articles to consider:\n\n`;
+      fundamentals.articles.forEach((art, idx) => {
+        fundamentalsText += `#${idx+1} - "${art.title}" from ${art.source?.name || 'unknown'}, published at ${art.publishedAt}\n`;
+      });
+      fundamentalsText += `\nIncorporate any relevant fundamental insights into your final conclusion.\n`;
+    }
+
+    
   return `
 We have daily macro => ${dailySummary}
 We have weekly macro => ${weeklySummary}
@@ -97,11 +127,11 @@ Now short-term (15m,1h) analysis:
 ${sum15m}
 1h:
 ${sum1h}
-
-Consider these weights in your final decision:
+${dateRangeText}${fundamentalsText}
+Use these weightings:
 - Daily macro: 30%
 - Weekly macro: 40%
-- Short-term (15m + 1h technicals): 30%
+- Short-term (15m + 1h): 30%
 
 Combine them into one final conclusion. Return JSON:
 {
@@ -125,17 +155,20 @@ Combine them into one final conclusion. Return JSON:
 async function analyzeSymbolRobustChainingApproachOffline(
   symbol,
   dailyDataSlice,
-  weeklyDataSlice,    // <--- Nový parameter pre weekly dáta
+  weeklyDataSlice,
   min15DataSlice,
-  hourDataSlice
+  hourDataSlice,
+  // NEW optional parameters below
+  fromTime,       // number|undefined
+  toTime,         // number|undefined
+  fundamentals    // object|undefined, e.g. { articles: [...] }
 ) {
   // 1) dailyStats
   let dailyStats;
   try {
     dailyStats = offlineDailyStats(dailyDataSlice);
   } catch (err) {
-    console.error('[LOG:analyzeSymbolOffline] offlineDailyStats error:', err.message);
-    // Fallback => hold
+    console.error('[LOG] offlineDailyStats error:', err.message);
     return {
       gptOutput: { final_action:'HOLD', comment:'Insufficient daily data => skip macro.' },
       tf15m: null, tf1h: null, tfDailyStats: null
@@ -151,93 +184,91 @@ async function analyzeSymbolRobustChainingApproachOffline(
       apiKey: process.env.OPENAI_API_KEY
     });
     console.log("[LOG] dailyPrompt =>", dailyPrompt);
+
     const resp1 = await openAiClient.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-4',
       messages: [{ role: 'user', content: dailyPrompt }]
     });
     let raw1 = resp1.choices[0]?.message?.content || '';
     raw1 = raw1.replace(/```(\w+)?/g, '').trim();
     dailyParsed = JSON.parse(raw1);
-    console.log("[LOG] dailyParsed =>", dailyParsed);
+
   } catch (e) {
     console.warn("GPT offline daily macro parse error:", e.message);
   }
 
-  let weeklyStats;
+  // 3) weeklyStats => GPT #2 => weekly macro
+  let weeklyStats, weeklyParsed = { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
   try {
     weeklyStats = offlineWeeklyStats(weeklyDataSlice);
-  } catch (err) {
-    console.error('[LOG:analyzeSymbolOffline] offlineWeeklyStats error:', err.message);
-    // Fallback => no weekly
-    weeklyStats = null;
+    const weeklyPrompt = buildWeeklyPromptOffline(symbol, weeklyStats);
+
+    const openAiClient = new OpenAI({
+      organization: process.env.OPENAI_ORGANIZATION,
+      apiKey: process.env.OPENAI_API_KEY
+    });
+    console.log("[LOG] weeklyPrompt =>", weeklyPrompt);
+
+    const resp2 = await openAiClient.chat.completions.create({
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: weeklyPrompt }]
+    });
+    let raw2 = resp2.choices[0]?.message?.content || '';
+    raw2 = raw2.replace(/```(\w+)?/g, '').trim();
+    weeklyParsed = JSON.parse(raw2);
+
+  } catch (e) {
+    console.warn("GPT offline weekly macro parse error:", e.message);
   }
 
-  // 4) GPT #2 => weekly macro
-  let weeklyParsed = { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
-  if (weeklyStats) {
-    try {
-      const weeklyPrompt = buildWeeklyPromptOffline(symbol, weeklyStats);
-      const openAiClient = new OpenAI({
-        organization: process.env.OPENAI_ORGANIZATION,
-        apiKey: process.env.OPENAI_API_KEY
-      });
-      console.log("[LOG] weeklyPrompt =>", weeklyPrompt);
-      const resp2 = await openAiClient.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [{ role: 'user', content: weeklyPrompt }]
-      });
-      let raw2 = resp2.choices[0]?.message?.content || '';
-      raw2 = raw2.replace(/```(\w+)?/g, '').trim();
-      weeklyParsed = JSON.parse(raw2);
-      console.log("[LOG] weeklyParsed =>", weeklyParsed);
-    } catch (e) {
-      console.warn("GPT offline weekly macro parse error:", e.message);
-    }
-  }
-
-  // 5) 15m, 1h indicators (tu pridáme try-catch bloky)
-  let tf15m = null;
-  let tf1h  = null;
-
+  // 4) short-term indicators (15m, 1h)
+  let tf15m = null, tf1h = null;
   try {
     tf15m = offlineIndicatorsForTimeframe(min15DataSlice, '15m');
   } catch (err) {
-    console.warn(`[LOG] No 15m data for symbol=${symbol}:`, err.message);
-    // tf15m ostáva null, v buildIndicatorSummaryOffline sa to zobrazí ako "N/A tfData"
+    console.warn(`[LOG] No 15m data: ${err.message}`);
   }
-
   try {
-    tf1h  = offlineIndicatorsForTimeframe(hourDataSlice, '1h');
+    tf1h = offlineIndicatorsForTimeframe(hourDataSlice, '1h');
   } catch (err) {
-    console.warn(`[LOG] No 1h data for symbol=${symbol}:`, err.message);
-    // tf1h ostáva null
+    console.warn(`[LOG] No 1h data: ${err.message}`);
   }
 
-  // 6) GPT #3 => synergy (combine daily, weekly, short-timeframe)
+  // 5) GPT #3 => synergy combined
   let synergyParsed = null;
   try {
-    const synergyPrompt = buildFinalSynergyPromptOffline(symbol, dailyParsed, weeklyParsed, tf15m, tf1h);
+    // Updated synergy prompt call (added fromTime, toTime, fundamentals)
+    const synergyPrompt = buildFinalSynergyPromptOffline(
+      symbol,
+      dailyParsed,
+      weeklyParsed,
+      tf15m,
+      tf1h,
+      fromTime,
+      toTime,
+      fundamentals
+    );
+
     const openAiClient = new OpenAI({
       organization: process.env.OPENAI_ORGANIZATION,
       apiKey: process.env.OPENAI_API_KEY
     });
     console.log("[LOG synergyPrompt] =>", synergyPrompt);
+
     const resp3 = await openAiClient.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-4',
       messages: [{ role: 'user', content: synergyPrompt }]
     });
-
     let raw3 = resp3.choices[0]?.message?.content || '';
     raw3 = raw3.replace(/```(\w+)?/g, '').trim();
     synergyParsed = JSON.parse(raw3);
-    console.log("[LOG synergy] synergyParsed =>", synergyParsed);
   } catch (e) {
     console.warn("GPT offline synergy parse error:", e.message);
   }
 
-  // Uložíme finálne rozhodnutie:
-  let final_action = synergyParsed?.final_action || 'HOLD';
-  let comment      = synergyParsed?.comment || '';
+  // Final output
+  const final_action = synergyParsed?.final_action || 'HOLD';
+  const comment      = synergyParsed?.comment || '';
 
   return {
     gptOutput: {

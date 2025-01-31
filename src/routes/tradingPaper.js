@@ -407,87 +407,64 @@ router.get('/simulation', async (req, res) => {
   };
 } */
 
-router.get('/directAnalysis', async (req, res) => {
-  try {
-    const symbol       = req.query.symbol       || 'BTC/USDT';
-    const approach     = req.query.approach     || 'robust';
-    const analysisMode = req.query.analysisMode || 'actual';
-
-    // Parse fromDate / toDate (e.g. "2023-09-01T10:30")
-    let fromTime = undefined;
-    let toTime   = undefined;
-
-    if (req.query.fromDate) {
-      const d = new Date(req.query.fromDate);
-      if (!isNaN(d.getTime())) {
-        fromTime = d.getTime();
+  router.get('/directAnalysis', async (req, res) => {
+    try {
+      const symbol       = req.query.symbol       || 'BTC/USDT';
+      const approach     = req.query.approach     || 'robust';
+      const analysisMode = req.query.analysisMode || 'actual';
+  
+      let fromTime, toTime;
+      if (req.query.fromDate) {
+        const d = new Date(req.query.fromDate);
+        if (!isNaN(d.getTime())) fromTime = d.getTime();
       }
-    }
-    if (req.query.toDate) {
-      const d2 = new Date(req.query.toDate);
-      if (!isNaN(d2.getTime())) {
-        toTime = d2.getTime();
+      if (req.query.toDate) {
+        const d2 = new Date(req.query.toDate);
+        if (!isNaN(d2.getTime())) toTime = d2.getTime();
       }
-    }
-
-    if (analysisMode === 'actual') {
-      // 1) "Actual" mode => real-time data
-      const exchange = new ccxt.binance({ enableRateLimit: true });
-      await exchange.loadMarkets();
-
-      const reevalData = await analyzeSymbolRobustChainingApproach(exchange, symbol);
-
-      return res.json({
-        success: true,
-        symbol,
-        approach,
-        analysisMode: 'actual',
-        finalAction:  reevalData.gptOutput?.final_action || 'HOLD',
-        commentGPT:   reevalData.gptOutput?.comment      || '(no comment)',
-        synergy:      reevalData.gptOutput
-      });
-    } else {
-      // 2) "Historical" mode => offline approach
-      const {
-        ohlcvDailyAll,
-        ohlcvWeeklyAll,
-        ohlcv1hAll,
-        ohlcv15mAll,
-        ohlcv1mAll
-      } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
-
-      const reevalData = await analyzeSymbolRobustChainingApproachOffline(
-        symbol,
-        ohlcvDailyAll,
-        ohlcvWeeklyAll,
-        ohlcv15mAll,
-        ohlcv1hAll
-        // ... plus 1m if your function references it, etc.
-      );
-
-      return res.json({
-        success: true,
-        symbol,
-        approach,
-        analysisMode: 'historical',
-        fromTime,
-        toTime,
-        finalAction: reevalData.gptOutput?.final_action || 'HOLD',
-        commentGPT:  reevalData.gptOutput?.comment      || '(no comment)',
-        synergy:     reevalData.gptOutput,
-        candleCounts: {
-          daily:  ohlcvDailyAll.length,
-          weekly: ohlcvWeeklyAll.length,
-          hour:   ohlcv1hAll.length,
-          m15:    ohlcv15mAll.length,
-          m1:     ohlcv1mAll.length
+  
+      if (analysisMode === 'actual') {
+        // ... real-time approach ...
+      } else {
+        // 1) fetch data (candles):
+        const { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv1mAll }
+          = await loadTimeframesForBacktest(symbol, fromTime, toTime);
+  
+        // 2) optionally fetch fundamentals from some news API or have them in your request body
+        let fundamentals = null;
+        if (req.query.includeFundamentals === 'true') {
+          // Example: fetch from some URL or local data
+          fundamentals = await getFundamentalsFromNewsAPI(symbol);
         }
-      });
+  
+        // 3) call offline approach
+        const reevalData = await analyzeSymbolRobustChainingApproachOffline(
+          symbol,
+          ohlcvDailyAll,
+          ohlcvWeeklyAll,
+          ohlcv15mAll,
+          ohlcv1hAll,
+          fundamentals,
+          fromTime,
+          toTime
+        );
+  
+        return res.json({
+          success: true,
+          symbol,
+          approach,
+          analysisMode: 'historical',
+          fromTime,
+          toTime,
+          finalAction: reevalData.gptOutput?.final_action || 'HOLD',
+          commentGPT:  reevalData.gptOutput?.comment      || '(no comment)',
+          synergy:     reevalData.gptOutput,
+        });
+      }
+    } catch (err) {
+      console.error("Chyba /directAnalysis:", err.message);
+      return res.status(500).json({ error: err.message });
     }
-  } catch (err) {
-    console.error("Chyba /directAnalysis:", err.message);
-    return res.status(500).json({ error: err.message });
-  }
-});
+  });
 
 module.exports = router;
