@@ -114,7 +114,7 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
 // ------------------------------------------------------------------------
 // /backTest endpoint
 // ------------------------------------------------------------------------
-router.get('/backTest', async (req, res) => {
+router.get('/backTest2', async (req, res) => {
   try {
     const symbol          = req.query.symbol || 'OG/USDT';
     let fromTime          = req.query.fromDate ? new Date(req.query.fromDate).getTime() : undefined;

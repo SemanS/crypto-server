@@ -121,7 +121,7 @@ async function backtest() {
 /**
  * 4) Route GET /backTest - spustí backtest a vráti JSON s výsledkom
  */
-router.get('/backTest', async (req, res) => {
+router.get('/backTest3', async (req, res) => {
   try {
     const result = await backtest();
     return res.json({ 
