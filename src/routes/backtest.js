@@ -12,37 +12,61 @@ function filterInRange(data, toTime) {
 router.get('/backTest', async (req, res) => {
   try {
     const symbol = req.query.symbol || 'OG/USDT';
-    // Oprava: kontrolujeme zadané hodnoty oboch parametrov zvlášť
+    
+    // Pokúsime sa dostať z query ISO stringy – ak sú prázdne, ostanú undefined
     let fromTime = req.query.fromDate && req.query.fromDate.trim() !== ''
       ? new Date(req.query.fromDate).getTime()
       : undefined;
     let toTime = req.query.toDate && req.query.toDate.trim() !== ''
       ? new Date(req.query.toDate).getTime()
       : undefined;
-
-    // Pre istotu, ak vzniknú NaN hodnoty, tak nastavíme undefined
+    
     if (isNaN(fromTime)) fromTime = undefined;
     if (isNaN(toTime)) toTime = undefined;
     
-    console.log("from", fromTime, "to", toTime); // pre debug
-
-    const hoursToBacktest = parseInt(req.query.hoursToBacktest || '12');
-
+    console.log("Pred načítaním dát – from:", fromTime, "to:", toTime);
+    
+    // Načítame dáta z ccxt (načítajú sa všetky príslušné timeframe)
     const data = await loadTimeframesForBacktest(symbol, fromTime, toTime);
-    const dailyData = filterInRange(data.ohlcvDailyAll, toTime);
-    const weeklyData = filterInRange(data.ohlcvWeeklyAll, toTime);
-    const hourData = filterInRange(data.ohlcv1hAll, toTime);
-    const min15Data = filterInRange(data.ohlcv15mAll, toTime);
-    const min1Data = filterInRange(data.ohlcv1mAll, toTime);
-
-    // Ak nie je zadaný fromTime, vyberieme prvý timestamp z hodinových dát
-    if (!fromTime && hourData.length > 0) {
-      fromTime = hourData[0][0];
+    const dailyData    = filterInRange(data.ohlcvDailyAll, toTime);
+    const weeklyData   = filterInRange(data.ohlcvWeeklyAll, toTime);
+    const hourData     = filterInRange(data.ohlcv1hAll, toTime);
+    const min15Data    = filterInRange(data.ohlcv15mAll, toTime);
+    const min1Data     = filterInRange(data.ohlcv1mAll, toTime);
+    
+    // Ak nie je zadaný fromTime alebo toTime, odvodíme ich z načítaných hodinových dát
+    if (hourData.length > 0) {
+      if (!fromTime) {
+        fromTime = hourData[0][0];
+        console.log("fromTime odvodzene z hourData:", tsToISO(fromTime));
+      }
+      if (!toTime) {
+        toTime = hourData[hourData.length - 1][0];
+        console.log("toTime odvodzene z hourData:", tsToISO(toTime));
+      }
     }
-
+    
+    // Ak klient explicitne nezadal hoursToBacktest, vypočítame ho z rozdielu toTime - fromTime
+    let hoursToBacktest;
+    if (req.query.hoursToBacktest) {
+      hoursToBacktest = parseInt(req.query.hoursToBacktest);
+    } else {
+      hoursToBacktest = Math.floor((toTime - fromTime) / (60 * 60 * 1000));
+    }
+    
+    console.log("hoursToBacktest:", hoursToBacktest);
+    
+    // Spustíme backtest s odvodzenými časovými hodnotami a počtom hodín
     const backtestResult = await runBacktest({ 
-      symbol, hoursToBacktest, fromTime, toTime, 
-      dailyData, weeklyData, hourData, min15Data, min1Data 
+      symbol, 
+      hoursToBacktest, 
+      fromTime, 
+      toTime, 
+      dailyData, 
+      weeklyData, 
+      hourData, 
+      min15Data, 
+      min1Data 
     });
     
     return res.json({

@@ -3,6 +3,7 @@ const router = express.Router(); // Fix small typo here
 const ccxt = require('ccxt');
 const { analyzeSymbolRobustChainingApproachOffline } = require('./analyzeSymbolRobustChainingApproachOffline');
 const { loadTimeframesForBacktest } = require('../services/loadTimeframesForBacktest');
+const { gptServiceOffline } = require('./gptServiceOffline');
 
 // Pomocné funkcie
 function tsToISO(ts) {
@@ -213,7 +214,7 @@ router.get('/backTest2', async (req, res) => {
       const weeklyDataSlice = weeklyAll.filter(c => lastHourTS >= c[0] + ONE_WEEK_MS);
 
       // GPT analýza
-      const analysis = await analyzeSymbolRobustChainingApproachOffline(
+      const analysis = await gptServiceOffline(
         symbol,
         dailyDataSlice,
         weeklyDataSlice,

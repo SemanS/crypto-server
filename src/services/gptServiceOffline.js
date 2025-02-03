@@ -1,20 +1,22 @@
 const OpenAI = require('openai');
 const { formatTS } = require('../utils/timeUtils');
-// Predpokladáme, že externý modul offlineIndicators obsahuje funkcie:
-// offlineDailyStats, offlineWeeklyStats, offlineIndicatorsForTimeframe
-const { offlineDailyStats, offlineWeeklyStats, offlineIndicatorsForTimeframe } = require('./offlineIndicators');
+const {
+  offlineDailyStats,
+  offlineWeeklyStats,
+  offlineIndicatorsForTimeframe
+} = require('./offlineIndicators');
 
-// Vytvoríme jednorazovú inštanciu klienta
+// Vytvoríme jednorazovú inštanciu OpenAI klienta
 const openAiClient = new OpenAI({
   organization: process.env.OPENAI_ORGANIZATION,
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// ------------------------------
+// --------------------------------------------------------
 // PROMPT GENERATORY
-// ------------------------------
+// --------------------------------------------------------
 
-// Funkcia na vytvorenie promptu pre dennú analýzu
+// Vytvorí prompt pre dennú analýzu na základe štatistík
 function buildDailyPrompt(symbol, dailyStats) {
   const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
   return `
@@ -30,7 +32,7 @@ Please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short r
 `;
 }
 
-// Funkcia na vytvorenie promptu pre týždennú analýzu
+// Vytvorí prompt pre týždennú analýzu
 function buildWeeklyPrompt(symbol, weeklyStats) {
   const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = weeklyStats;
   return `
@@ -46,7 +48,7 @@ Please provide a "weekly_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short 
 `;
 }
 
-// Rozšírený funkčný generátor pre indikátorové sumáre – ktorý kontroluje všetky dostupné indikátory
+// Vytvorí krátky prehľad indikátorov pre daný timeframe
 function buildIndicatorSummary(tfData) {
   if (!tfData) return 'N/A';
   
@@ -84,7 +86,7 @@ function buildIndicatorSummary(tfData) {
   }
   if (tfData.lastATR) summary += `ATR=${tfData.lastATR.toFixed(2)}\n`;
   
-  // Ďalšie indikátory pre scalping
+  // Indikátory pre scalping
   if (tfData.lastCCI) summary += `CCI=${tfData.lastCCI.toFixed(2)}\n`;
   if (tfData.lastWilliamsR) summary += `Williams %R=${tfData.lastWilliamsR.toFixed(2)}\n`;
   if (tfData.lastKeltner) {
@@ -102,7 +104,7 @@ function buildIndicatorSummary(tfData) {
   return summary;
 }
 
-// Finálny synergický prompt, ktorý kombinuje denný, týždenný a krátkodobý prehľad, dynamické váženie a risk management
+// Kombinuje všetky analyzy do finálneho synergického promptu
 function buildFinalSynergyPrompt(symbol, dailyMacro, weeklyMacro, tf15m, tf1h, fromTime, toTime, fundamentals) {
   const dailySummary = `macro_view=${dailyMacro.macro_view}, reason=${dailyMacro.macro_comment}`;
   const weeklySummary = `weekly_view=${weeklyMacro.weekly_view}, reason=${weeklyMacro.weekly_comment}`;
@@ -153,7 +155,7 @@ Risk Management:
 
 Combine all the above into one final conclusion. Return JSON in the following format (no extra text):
 {
-  "technical_signal_strength": 0, // value between 0 and 1
+  "technical_signal_strength": 0, 
   "final_action": "BUY"|"SELL"|"HOLD",
   "stop_loss": <number>,
   "target_profit": <number>,
@@ -162,9 +164,9 @@ Combine all the above into one final conclusion. Return JSON in the following fo
 `;
 }
 
-// ------------------------------
+// --------------------------------------------------------
 // FUNKCIA NA VOLANIE OPENAI API
-// ------------------------------
+// --------------------------------------------------------
 async function callOpenAI(prompt) {
   try {
     console.log('[GPTService] Sending prompt to OpenAI:', prompt);
@@ -173,9 +175,8 @@ async function callOpenAI(prompt) {
       messages: [{ role: 'user', content: prompt }]
     });
     let raw = response.choices[0]?.message?.content || '';
-    // Odstránenie prípadných tagov s kódom (```...)
+    // Odstráni prípadné bloky s kódom (napr. "```")
     raw = raw.replace(/```(\w+)?/g, '').trim();
-    console.log("raw" + JSON.stringify(JSON.parse(raw)))
     return JSON.parse(raw);
   } catch (err) {
     console.warn('[GPTService] Error calling OpenAI:', err.message);
@@ -183,10 +184,26 @@ async function callOpenAI(prompt) {
   }
 }
 
-// ------------------------------
-// HLAVNÁ FUNKCIA pre reťazcovú analýzu symbolu
-// ------------------------------
-async function analyzeSymbolChain(
+// --------------------------------------------------------
+// HLAVNÁ FUNKCIA: gptServiceOffline
+// --------------------------------------------------------
+/*
+  Funkcia gptServiceOffline spája offline štatistiky a indikátory a vytvára
+  finálny synergický prompt, ktorý odošle do OpenAI pomocou callOpenAI.
+  
+  Parametre:
+    symbol          - názov páru/symbolu
+    dailyDataSlice  - denné dáta pre backtest (pole)
+    weeklyDataSlice - týždenné dáta pre backtest (pole)
+    min15DataSlice  - 15minutové dáta
+    hourDataSlice   - hodinové dáta
+    fromTime, toTime- časové obdobie (užitočné pre prompt)
+    fundamentals    - objekt s fundamentálnymi článkami/news (voliteľné)
+  
+  Vráti objekt s gptOutput (final_action, stop_loss, target_profit, comment)
+  a dodatočnými štatistikami.
+*/
+async function gptServiceOffline(
   symbol,
   dailyDataSlice,
   weeklyDataSlice,
@@ -194,45 +211,44 @@ async function analyzeSymbolChain(
   hourDataSlice,
   fromTime,
   toTime,
-  fundamentals  // parametre s fundamentálnymi dátami (news články, atď.)
+  fundamentals
 ) {
-  // Vypočítame denné a týždenné štatistiky synchronne
+  // Vypočítame denné a týždenné štatistiky
   const dailyStats = offlineDailyStats(dailyDataSlice);
   const weeklyStats = offlineWeeklyStats(weeklyDataSlice);
   
-  const dailyPrompt = buildDailyPrompt(symbol, dailyStats);
-  const weeklyPrompt = buildWeeklyPrompt(symbol, weeklyStats);
+  // Zostavíme prompt pre dennú a týždennú analýzu a spustíme paralelné API volania
+  const dailyPromise = callOpenAI(buildDailyPrompt(symbol, dailyStats))
+    .catch(err => {
+      console.error('[GPTService] Daily analysis error:', err.message);
+      return { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
+    });
+  const weeklyPromise = callOpenAI(buildWeeklyPrompt(symbol, weeklyStats))
+    .catch(err => {
+      console.error('[GPTService] Weekly analysis error:', err.message);
+      return { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
+    });
   
-  // Spustíme OpenAI požiadavky pre denné a týždenné signály paralelne
-  const dailyPromise = callOpenAI(dailyPrompt).catch(err => {
-    console.error('[GPTService] Daily analysis error:', err.message);
-    return { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
-  });
-  const weeklyPromise = callOpenAI(weeklyPrompt).catch(err => {
-    console.error('[GPTService] Weekly analysis error:', err.message);
-    return { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
-  });
-  
-  // Paralelne získame krátkodobé indikátory pre 15m a 1h timeframe
-  const tfIndicatorsPromise = Promise.all([
-    Promise.resolve(offlineIndicatorsForTimeframe(min15DataSlice, '15m')).catch(err => {
-      console.warn('[GPTService] 15m indicator error:', err.message);
-      return null;
-    }),
-    Promise.resolve(offlineIndicatorsForTimeframe(hourDataSlice, '1h')).catch(err => {
-      console.warn('[GPTService] 1h indicator error:', err.message);
-      return null;
-    })
+  // Paralelne získame indikátory pre timeframe 15m a 1h
+  const [tf15m, tf1h] = await Promise.all([
+    Promise.resolve(offlineIndicatorsForTimeframe(min15DataSlice, '15m'))
+      .catch(err => {
+        console.warn('[GPTService] 15m indicator error:', err.message);
+        return null;
+      }),
+    Promise.resolve(offlineIndicatorsForTimeframe(hourDataSlice, '1h'))
+      .catch(err => {
+        console.warn('[GPTService] 1h indicator error:', err.message);
+        return null;
+      })
   ]);
   
-  // Počkáme na výsledky všetkých paralelných operácií
   const [dailyResult, weeklyResult] = await Promise.all([dailyPromise, weeklyPromise]);
-  const [tf15m, tf1h] = await tfIndicatorsPromise;
   
   const dailyMacro = dailyResult || { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
   const weeklyMacro = weeklyResult || { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
-  
-  // Vytvoríme finálny synergický prompt, ktorý obsahuje dynamické váženie a risk management
+
+  // Vytvoríme finálny synergy prompt
   const synergyPrompt = buildFinalSynergyPrompt(
     symbol,
     dailyMacro,
@@ -250,8 +266,8 @@ async function analyzeSymbolChain(
   } catch (err) {
     console.error('[GPTService] Synergy analysis error:', err.message);
   }
-
-  console.log("finalSynergy" + JSON.stringify(finalSynergy))
+  
+  console.log('[GPTService] Final Synergy:', JSON.stringify(finalSynergy));
   
   return {
     gptOutput: {
@@ -268,5 +284,8 @@ async function analyzeSymbolChain(
   };
 }
 
-// Exportujeme funkcie
-module.exports = { analyzeSymbolChain, callOpenAI };
+// Export funkcií
+module.exports = {
+  gptServiceOffline,
+  callOpenAI
+};

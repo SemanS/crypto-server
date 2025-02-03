@@ -10,6 +10,7 @@ const { analyzeSymbolRobustChainingApproach } = require('../analysis/analyzeSymb
 const { analyzeSymbolRobustChainingApproachOffline } = require('../services/analyzeSymbolRobustChainingApproachOffline');
 const { simulate } = require('../services/simulation');
 const { loadTimeframesForBacktest } = require('../services/loadTimeframesForBacktest');
+const { analyzeSymbolChain } = require('../services/gptService')
 // V pamäti držíme simulované obchody (paper trades)
 const paperTrades = {};
 
@@ -412,8 +413,9 @@ router.get('/simulation', async (req, res) => {
       const symbol       = req.query.symbol       || 'BTC/USDT';
       const approach     = req.query.approach     || 'robust';
       const analysisMode = req.query.analysisMode || 'actual';
-  
+      
       let fromTime, toTime;
+      // Ak sú v query zadané dátumy, spracujeme ich
       if (req.query.fromDate) {
         const d = new Date(req.query.fromDate);
         if (!isNaN(d.getTime())) fromTime = d.getTime();
@@ -422,33 +424,89 @@ router.get('/simulation', async (req, res) => {
         const d2 = new Date(req.query.toDate);
         if (!isNaN(d2.getTime())) toTime = d2.getTime();
       }
-  
+      
       if (analysisMode === 'actual') {
-        // ... real-time approach ...
-      } else {
-        // 1) fetch data (candles):
-        const { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv1mAll }
-          = await loadTimeframesForBacktest(symbol, fromTime, toTime);
-  
-        // 2) optionally fetch fundamentals from some news API or have them in your request body
-        let fundamentals = null;
-        if (req.query.includeFundamentals === 'true') {
-          // Example: fetch from some URL or local data
-          fundamentals = await getFundamentalsFromNewsAPI(symbol);
-        }
-  
-        // 3) call offline approach
-        const reevalData = await analyzeSymbolRobustChainingApproachOffline(
+        // Live analýza: nastavíme aktuálny čas
+        fromTime = Date.now();
+        toTime   = Date.now();
+        
+        // Vytvoríme inštanciu ccxt klienta, napr. pre Binance
+        const exchange = new ccxt.binance({ enableRateLimit: true });
+        
+        // Načítame aktuálny ticker pre dodatočné informácie
+        const ticker = await exchange.fetchTicker(symbol);
+        
+        // Načítame OHLCV dáta pre rôzne timeframe:
+        const dailyData  = await exchange.fetchOHLCV(symbol, '1d');  // Denné dáta
+        const weeklyData = await exchange.fetchOHLCV(symbol, '1w');  // Týždenné dáta
+        const min15Data  = await exchange.fetchOHLCV(symbol, '15m'); // 15-minútové dáta
+        const hourData   = await exchange.fetchOHLCV(symbol, '1h');  // Hodinové dáta
+        
+        // Pracujeme s hodinovými dátami iba do aktuálneho indexu
+        const curIndex = hourData.length - 1;
+        
+        // Zavoláme analyzačnú reťaz so získanými dátami
+        const gptOutput = await analyzeSymbolChain(
           symbol,
+          dailyData.slice(),                   // Denné dáta
+          weeklyData.slice(),                  // Týždenné dáta
+          min15Data.slice(),                   // 15-minútové dáta
+          hourData.slice(0, curIndex + 1),       // Hodinové dáta
+          fromTime,
+          toTime,
+          null                                 // V tomto príklade neodovzdávame fundamentálne dáta
+        );
+        
+        console.log("gptOutput" + JSON.stringify(gptOutput))
+
+        // Vraciame nielen výsledok analýzy, ale aj ticker a raw OHLCV dáta
+        return await res.json({
+          success: true,
+          symbol,
+          approach,
+          analysisMode: 'actual',
+          fromTime,
+          toTime,
+          ticker,
+          finalAction: gptOutput?.gptOutput.final_action || 'HOLD',
+          commentGPT:  gptOutput?.gptOutput.comment || '(no comment)',
+          synergy: {
+            final_action: gptOutput.gptOutput.final_action,
+            technical_signal_strength: gptOutput?.gptOutput.technical_signal_strength || 0,
+            stop_loss: gptOutput?.gptOutput.stop_loss || null,
+            target_profit: gptOutput?.gptOutput.target_profit || null,
+            comment: gptOutput?.gptOutput.comment || ''
+          },
+        });
+        
+      } else {
+        // Režim historical – offline dáta
+        const {
           ohlcvDailyAll,
           ohlcvWeeklyAll,
           ohlcv15mAll,
-          ohlcv1hAll,
-          fundamentals,
+          ohlcv1hAll
+        } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
+    
+        // Ak je potrebné, načítame aj fundamentálne dáta
+        let fundamentals = null;
+        if (req.query.includeFundamentals === 'true') {
+          const { getFundamentalsFromNewsAPI } = require('../services/fundamentalsService');
+          fundamentals = await getFundamentalsFromNewsAPI(symbol);
+        }
+    
+        // Zavoláme analyzačnú reťaz s offline dátami
+        const analysis = await analyzeSymbolChain(
+          symbol,
+          ohlcvDailyAll.slice(),   // Denné dáta
+          ohlcvWeeklyAll.slice(),  // Týždenné dáta
+          ohlcv15mAll.slice(),     // 15-minútové dáta
+          ohlcv1hAll.slice(),      // Hodinové dáta
           fromTime,
-          toTime
+          toTime,
+          fundamentals
         );
-  
+    
         return res.json({
           success: true,
           symbol,
@@ -456,9 +514,9 @@ router.get('/simulation', async (req, res) => {
           analysisMode: 'historical',
           fromTime,
           toTime,
-          finalAction: reevalData.gptOutput?.final_action || 'HOLD',
-          commentGPT:  reevalData.gptOutput?.comment      || '(no comment)',
-          synergy:     reevalData.gptOutput,
+          finalAction: analysis.gptOutput?.final_action || 'HOLD',
+          commentGPT:  analysis.gptOutput?.comment      || '(no comment)',
+          synergy:     analysis.gptOutput,
         });
       }
     } catch (err) {
@@ -466,5 +524,6 @@ router.get('/simulation', async (req, res) => {
       return res.status(500).json({ error: err.message });
     }
   });
-
-module.exports = router;
+  
+  module.exports = router;
+  

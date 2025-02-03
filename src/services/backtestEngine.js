@@ -1,6 +1,6 @@
 const { find1mClosePriceAtTime } = require('./dataLoader');
 const { tsToISO, timeframeToMs } = require('../utils/timeUtils');
-const { analyzeSymbolChain } = require('./gptService');
+const { gptServiceOffline } = require('./gptServiceOffline');
 
 // Výpočet PnL v percentách
 function computePnL(direction, openPrice, closePrice) {
@@ -12,10 +12,10 @@ function computePnL(direction, openPrice, closePrice) {
   return 0;
 }
 
-// Upravená funkcia runBacktest: pridali sme parameter ws
+// Funkcia runBacktest – počet hodín sa teraz počíta dynamicky na základe fromTime a toTime
 async function runBacktest({
   symbol,
-  hoursToBacktest = 12,
+  hoursToBacktest = 12,  // Default hodnota, ak by fromTime/toTime neboli zadané
   fromTime,
   toTime,
   dailyData,
@@ -23,14 +23,22 @@ async function runBacktest({
   hourData,
   min15Data,
   min1Data,
-  stopLossThreshold = 0.95, // napríklad 95%
-  takeProfitGain = 1.10      // napríklad 110%
+  stopLossThreshold = 0.95, // Napr. 95%
+  takeProfitGain = 1.10     // Napr. 110%
 }, ws) {
   let runningPnL = 0;
 
-  // Nájdeme index prvej hodiny, ktorá je >= fromTime
+  // Ak sú k dispozícii fromTime a toTime, spočítame počet hodín medzi nimi:
+  if (fromTime && toTime) {
+    const diffInMs = toTime - fromTime;  // Predpokladáme, že fromTime a toTime sú číselné timestampy
+    hoursToBacktest = Math.floor(diffInMs / (1000 * 60 * 60));
+  }
+
+  // Nájdeme index prvej hodinovej sviečky, ktorej timestamp je >= fromTime
   const fromIndex = hourData.findIndex(c => c[0] >= fromTime);
-  if (fromIndex === -1) throw new Error(`No hour data found at or after ${tsToISO(fromTime)}`);
+  if (fromIndex === -1) {
+    throw new Error(`No hour data found at or after ${tsToISO(fromTime)}`);
+  }
 
   console.log(`[BacktestEngine] Starting backtest from index ${fromIndex} (${tsToISO(hourData[fromIndex][0])}) for ${hoursToBacktest} hours`);
 
@@ -39,6 +47,7 @@ async function runBacktest({
   let positionOpenPrice = 0;
   let positionOpenTime = 0;
 
+  // Cyklus pre jednotlivé hodiny podľa hoursToBacktest
   for (let i = 0; i < hoursToBacktest; i++) {
     const curIndex = fromIndex + i;
     const hourCandle = hourData[curIndex];
@@ -46,26 +55,24 @@ async function runBacktest({
     const lastHourTS = hourCandle[0];
     console.log(`[BacktestEngine] Hour iteration ${i}, timestamp: ${tsToISO(lastHourTS)}`);
 
-    // Príprava slice dát a fundamentálna analýza – (podľa Vášho pôvodného kódu)
-    // ...
-
-    // Volanie GPT analýzy
-    const analysis = await analyzeSymbolChain(
+    // Príprava dátových slice – napr. denné, týždenné, 15m a hodinové dáta
+    // a volanie GPT analýzy (môžete prispôsobiť slice podľa potreby):
+    const analysis = await gptServiceOffline(
       symbol,
-      dailyData.slice(), // prípadne prispôsobte slice podľa logiky
+      dailyData.slice(),
       weeklyData.slice(),
       min15Data.slice(),
       hourData.slice(0, curIndex + 1),
       fromTime,
       toTime,
-      null  // v ukážke zjednodušíme fundamentálne dáta
+      null  // Fundamentálne dáta – v tejto ukážke zjednodušíme
     );
     const finalAction = analysis.gptOutput.final_action || 'HOLD';
     console.log(`[BacktestEngine] GPT recommended: ${finalAction}`);
 
-    // Otvorenie pozície, ak ešte nie je otvorená a odporúčanie je BUY/SELL
+    // Otvorenie pozície ak ešte nie je otvorená a GPT odporúča BUY alebo SELL
     if (!positionOpen && (finalAction === 'BUY' || finalAction === 'SELL')) {
-      const openTime = lastHourTS + timeframeToMs('1h'); // otvorenie v nasledujúcej hodine
+      const openTime = lastHourTS + timeframeToMs('1h'); // Otvorenie v nasledujúcej hodine
       const openPrice = find1mClosePriceAtTime(min1Data, openTime);
       if (openPrice !== null) {
         positionOpen = true;
@@ -96,6 +103,7 @@ async function runBacktest({
         tpPrice = positionOpenPrice / takeProfitGain;
       }
 
+      // Pre každý 1-minútny candle kontrolujeme SL/TP
       for (const candle of oneMinCandles) {
         const candleTS = candle[0];
         const candleClose = candle[4];
@@ -153,7 +161,7 @@ async function runBacktest({
     }
 
     if (!positionOpen && !summaryRow) {
-      // Ak nebola vykonaná žiadna obchodná operácia, vytvoríme summary riadok
+      // Ak sa nevykonala žiadna obchodná operácia, vytvorte summary riadok
       summaryRow = {
         iteration: i,
         timestamp: tsToISO(lastHourTS),
@@ -167,8 +175,8 @@ async function runBacktest({
       };
     }
 
+    // Odoslanie riadku ako update cez WebSocket
     if (summaryRow) {
-      // Odosielame každý riadok ako update cez WebSocket
       ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
     }
   } // koniec cyklu
