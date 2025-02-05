@@ -23,7 +23,6 @@ function aggregateCandlePairs(candle1, candle2) {
 
 async function runBacktest({
   symbol,
-  hoursToBacktest = 12,
   fromTime,
   toTime,
   dailyData,
