@@ -35,8 +35,9 @@ async function runBacktest({
   decisionTF = '15m'
 }, ws) {
   let runningPnL = 0;
-  const profitTargetPercent = 0.04;
-  const lossTargetPercent = 0.08;
+  // Nastavenie percent pre take profit a stop loss
+  const profitTargetPercent = 0.04;    // 4% take profit
+  const lossTargetPercent = 0.08;      // 8% stop loss
   const decisionIntervalMs = timeframeToMs(decisionTF);
   let decisionData;
   if (decisionTF === '5m') {
@@ -50,7 +51,7 @@ async function runBacktest({
     }
     const aggregated30m = [];
     for (let i = 0; i < source.length; i += 2) {
-      aggregated30m.push(aggregateCandlePairs(source[i], source[i+1]));
+      aggregated30m.push(aggregateCandlePairs(source[i], source[i + 1]));
     }
     decisionData = aggregated30m;
   } else if (decisionTF === '1h' || decisionTF === '60m') {
@@ -58,11 +59,13 @@ async function runBacktest({
   } else {
     throw new Error(`Unsupported decisionTF value: ${decisionTF}`);
   }
+
   let currentIdx = decisionData.findIndex(c => c[0] >= fromTime);
   if (currentIdx === -1) {
     throw new Error(`No ${decisionTF} data found at or after ${tsToISO(fromTime)}`);
   }
-  const startIdx = currentIdx;
+
+  // Spustíme GPT analýzy pre každý rozhodovací interval
   const gptTasks = [];
   for (let i = currentIdx; i < decisionData.length; i++) {
     gptTasks.push(
@@ -79,174 +82,88 @@ async function runBacktest({
     );
   }
   const gptResults = await Promise.all(gptTasks);
-  let positionOpen = false;
-  let positionDirection = null;
-  let positionOpenPrice = 0;
-  let positionOpenTime = 0;
-  while (currentIdx < decisionData.length) {
-    const decisionCandle = decisionData[currentIdx];
+
+  // Pre každý 15‑minútový interval simulujeme obchod jednotlivo
+  for (let i = currentIdx; i < decisionData.length; i++) {
+    const decisionCandle = decisionData[i];
     const decisionTime = decisionCandle[0];
     if (toTime && decisionTime > toTime) break;
-    const analysis = gptResults[currentIdx - startIdx];
+
+    const analysis = gptResults[i - currentIdx];
     if (!analysis || !analysis.gptOutput || typeof analysis.gptOutput.final_action === 'undefined') {
       throw new Error(`Missing final_action in analysis for decision time ${tsToISO(decisionTime)}`);
     }
-    const finalAction = analysis.gptOutput.final_action;
+    const finalAction = analysis.gptOutput.final_action; // "BUY", "SELL" alebo "HOLD"
     const signalStrength = Number(analysis.gptOutput.technical_signal_strength);
-    if (!positionOpen && (finalAction === 'BUY' || finalAction === 'SELL')) {
-      if ((signalStrength >= 70) ||
-          (signalStrength >= 7 && signalStrength <= 9)) {
-        const openTime = decisionTime + decisionIntervalMs;
-        const openPrice = find1mClosePriceAtTime(min1Data, openTime);
-        if (openPrice !== null) {
-          positionOpen = true;
-          positionDirection = finalAction;
-          positionOpenPrice = openPrice;
-          positionOpenTime = openTime;
-        }
-      } else {
-        const summaryRow = {
-          iteration: currentIdx,
-          timestamp: tsToISO(decisionCandle[0]),
-          openPrice: decisionCandle[4],
-          closePrice: decisionCandle[4],
-          tradePnLPercent: 0,
-          runningPnLPercent: runningPnL,
-          position: "HOLD",
-          holdPosition: "No Trade",
-          closedAt: tsToISO(decisionCandle[0]),
-          gptComment: analysis?.gptOutput?.comment || "No comment",
-          technical_signal_strength: signalStrength
-        };
-        ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
-        currentIdx++;
-        continue;
-      }
-    }
-    const intervalStart = decisionTime;
-    const intervalEnd = intervalStart + decisionIntervalMs;
-    const oneMinCandles = min1Data
-      .filter(c => c[0] >= intervalStart && c[0] < intervalEnd)
-      .sort((a, b) => a[0] - b[0]);
-    if (positionOpen && oneMinCandles.length !== 0) {
+
+    let tradeOpenPrice = decisionCandle[1];   // Otváracia cena obchodu – z 15m sviečky
+    let tradeClosePrice = decisionCandle[4];    // Predvolená zatváracia cena, ak nedôjde k skoršiemu exitu
+    let tradePnL = 0;
+
+    // Ak je signál na obchod a technická sila dosahuje prah, simulujeme obchod
+    if ((finalAction === 'BUY' || finalAction === 'SELL') &&
+        (signalStrength >= 70 || (signalStrength >= 7 && signalStrength <= 9))) {
+      
       let tpPrice, slPrice;
-      if (analysis?.gptOutput?.stop_loss != null && analysis.gptOutput.target_profit != null) {
-        slPrice = analysis.gptOutput.stop_loss;
-        tpPrice = analysis.gptOutput.target_profit;
-      } else {
-        if (positionDirection === 'BUY') {
-          tpPrice = positionOpenPrice * (1 + profitTargetPercent);
-          slPrice = positionOpenPrice * (1 - lossTargetPercent);
-        } else {
-          tpPrice = positionOpenPrice * (1 - profitTargetPercent);
-          slPrice = positionOpenPrice * (1 + lossTargetPercent);
-        }
+      if (finalAction === 'BUY') {
+        tpPrice = tradeOpenPrice * (1 + profitTargetPercent);
+        slPrice = tradeOpenPrice * (1 - lossTargetPercent);
+      } else { // SELL
+        tpPrice = tradeOpenPrice * (1 - profitTargetPercent);
+        slPrice = tradeOpenPrice * (1 + lossTargetPercent);
       }
-      let tradeClosed = false;
-      let triggerCandle = null;
-      let candleIdx = 0;
-      while (candleIdx < oneMinCandles.length) {
-        const candle = oneMinCandles[candleIdx];
-        const candleClose = candle[4];
-        const currentPnL = computePnL(positionDirection, positionOpenPrice, candleClose);
-        if (positionDirection === 'BUY') {
-          if (candle[2] >= tpPrice ||
-              candle[3] <= slPrice ||
-              currentPnL >= profitTargetPercent * 100 ||
-              currentPnL <= -lossTargetPercent * 100) {
-            tradeClosed = true;
-            triggerCandle = candle;
+      
+      // Získame 1‑minútové dáta pre daný 15‑minútový interval
+      const intervalStart = decisionCandle[0];
+      const intervalEnd = intervalStart + decisionIntervalMs;
+      const oneMinCandles = min1Data
+        .filter(c => c[0] >= intervalStart && c[0] < intervalEnd)
+        .sort((a, b) => a[0] - b[0]);
+
+      let exitPrice = null;
+      for (let candle of oneMinCandles) {
+        if (finalAction === 'BUY') {
+          if (candle[2] >= tpPrice) {
+            exitPrice = tpPrice;
+            break;
+          } else if (candle[3] <= slPrice) {
+            exitPrice = slPrice;
+            break;
+          }
+        } else { // SELL
+          if (candle[3] <= tpPrice) {
+            exitPrice = tpPrice;
+            break;
+          } else if (candle[2] >= slPrice) {
+            exitPrice = slPrice;
             break;
           }
         }
-        if (positionDirection === 'SELL') {
-          if (candle[3] <= tpPrice ||
-              candle[2] >= slPrice ||
-              currentPnL >= profitTargetPercent * 100 ||
-              currentPnL <= -lossTargetPercent * 100) {
-            tradeClosed = true;
-            triggerCandle = candle;
-            break;
-          }
-        }
-        candleIdx++;
       }
-      const summaryCandle = tradeClosed && triggerCandle 
-        ? triggerCandle 
-        : (oneMinCandles.length ? oneMinCandles[oneMinCandles.length - 1] : null);
-      if (summaryCandle) {
-        const summaryPnL = computePnL(positionDirection, positionOpenPrice, summaryCandle[4]);
-        if (tradeClosed) {
-          runningPnL += summaryPnL;
-        }
-        const summaryRow = {
-          iteration: currentIdx,
-          timestamp: tsToISO(summaryCandle[0]),
-          openPrice: positionOpenPrice,
-          closePrice: summaryCandle[4],
-          tradePnLPercent: summaryPnL,
-          runningPnLPercent: runningPnL,
-          position: positionDirection,
-          holdPosition: tradeClosed ? "Closed" : "Held",
-          closedAt: tradeClosed ? tsToISO(summaryCandle[0]) : "",
-          gptComment: analysis?.gptOutput?.comment || "No comment",
-          technical_signal_strength: signalStrength
-        };
-        ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
-        if (tradeClosed) {
-          positionOpen = false;
-          positionDirection = null;
-          positionOpenPrice = 0;
-          positionOpenTime = 0;
-          const newIdx = decisionData.findIndex(c => c[0] > triggerCandle[0]);
-          currentIdx = newIdx === -1 ? decisionData.length : newIdx;
-          continue;
-        }
+      if (exitPrice !== null) {
+        tradeClosePrice = exitPrice;
       }
+      tradePnL = computePnL(finalAction, tradeOpenPrice, tradeClosePrice);
     }
-    if (!positionOpen) {
-      const summaryRow = {
-        iteration: currentIdx,
-        timestamp: tsToISO(decisionCandle[0]),
-        openPrice: decisionCandle[4],
-        closePrice: decisionCandle[4],
-        tradePnLPercent: 0,
-        runningPnLPercent: runningPnL,
-        position: "HOLD",
-        holdPosition: "No Trade",
-        closedAt: tsToISO(decisionCandle[0]),
-        gptComment: analysis?.gptOutput?.comment || "No comment",
-        technical_signal_strength: signalStrength
-      };
-      ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
-    }
-    currentIdx++;
-  }
-  if (positionOpen) {
-    const lastDecisionCandle = decisionData[currentIdx - 1];
-    let finalClosePrice = positionOpenPrice;
-    if (lastDecisionCandle) {
-      const theoreticalCloseTime = lastDecisionCandle[0] + decisionIntervalMs;
-      const foundPrice = find1mClosePriceAtTime(min1Data, theoreticalCloseTime);
-      if (foundPrice !== null) finalClosePrice = foundPrice;
-    }
-    const finalTradePnL = computePnL(positionDirection, positionOpenPrice, finalClosePrice);
-    runningPnL += finalTradePnL;
-    const finalRow = {
-      iteration: currentIdx,
-      timestamp: lastDecisionCandle ? tsToISO(lastDecisionCandle[0]) : 'N/A',
-      openPrice: positionOpenPrice,
-      closePrice: finalClosePrice,
-      tradePnLPercent: finalTradePnL,
+    // Ak signál nie je obchodný ("HOLD"), zostáva obchod nevykonaný – tradePnL = 0
+
+    runningPnL += tradePnL;
+    const summaryRow = {
+      iteration: i,
+      timestamp: tsToISO(decisionCandle[0]),
+      openPrice: tradeOpenPrice,
+      closePrice: tradeClosePrice,
+      tradePnLPercent: tradePnL,
       runningPnLPercent: runningPnL,
-      position: positionDirection,
-      holdPosition: positionOpen ? "Held" : "Closed",
-      closedAt: tsToISO(Date.now()),
-      gptComment: "Final trade closed",
-      technical_signal_strength: 0
+      position: (finalAction === 'BUY' || finalAction === 'SELL') ? finalAction : "HOLD",
+      holdPosition: (finalAction === 'BUY' || finalAction === 'SELL') ? "Closed" : "No Trade",
+      closedAt: tsToISO(decisionCandle[0]), // obchod uzavretý na konci intervalu
+      gptComment: analysis?.gptOutput?.comment || "No comment",
+      technical_signal_strength: signalStrength
     };
-    ws.send(JSON.stringify({ type: 'update', data: finalRow }));
+    ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
   }
+  
   ws.send(JSON.stringify({ type: 'final', runningPnL }));
 }
 
