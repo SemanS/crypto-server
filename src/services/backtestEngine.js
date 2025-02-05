@@ -1,6 +1,6 @@
 const { find1mClosePriceAtTime } = require('./dataLoader');
 const { tsToISO, timeframeToMs } = require('../utils/timeUtils');
-const { analyzeSymbolChain } = require('./gptService');
+const { analyzeSymbolChain } = require('./gptServiceOffline');
 
 // Výpočet PnL v percentách
 function computePnL(direction, openPrice, closePrice) {
@@ -12,26 +12,33 @@ function computePnL(direction, openPrice, closePrice) {
   return 0;
 }
 
+/**
+ * Agregácia dvoch sviečok do jednej 30m sviečky.
+ * Predpokladáme formát: [timestamp, open, high, low, close, volume].
+ * Timestamp novej sviečky bude timestamp prvej sviečky.
+ */
+function aggregateCandlePairs(candle1, candle2) {
+  const ts = candle1[0];
+  const open = candle1[1];
+  const high = Math.max(candle1[2], candle2[2]);
+  const low = Math.min(candle1[3], candle2[3]);
+  const close = candle2[4];
+  const volume = candle1[5] + candle2[5];
+  return [ts, open, high, low, close, volume];
+}
+
 /*
-  Táto verzia runBacktest najprv (ak sú fromTime a toTime zadané)
-  dynamicky spočíta hodiny medzi nimi.
+  runBacktest – táto verzia umožňuje konfigurovať rozhodovací interval pomocou parametra decisionTF,
+  ktorý môže mať hodnoty napr. "5m", "15m", "30m", "1h" (alebo "60m").
   
-  Potom pre každú hodinu (od fromIndex) spustíme asynchrónu úlohu, 
-  ktorá získava “hour-specific” GPT analýzu – tieto volania bežia paralelne.
-  
-  Keď sa všetky GPT analýzy skončia (cez Promise.all), výsledky 
-  sa zoradia podľa poradia hodín a potom sa sekvenčne spracujú na 
-  aktualizáciu obchodného stavu (otvorenie/uzavretie obchodu, runningPnL, atď.).
-  Takto je každý “krok” spracovaný izolovane a nedochádza k race condition.
-  
-  Poznámka: Ak je obchodný stav závislý medzi hodinami (napr. otvorená pozícia
-  prechádza do ďalších hodín), je nutné následné rozhodnutia vykonávať sekvenčne.
+  Počet intervalov sa vypočíta ako floor((toTime - fromTime) / (rozhodovací interval)).
+  Pri otváraní/ukončení obchodu sa čas posúva o rozhodovací interval.
+  Ostatné dáta pre výpočet indikátorov (dailyData, weeklyData, min15Data, min5Data, min1Data, hourData)
+  ostávajú nezmenené.
 */
 async function runBacktest({
   symbol,
-  // Ak nie sú zadané fromTime/toTime použije default 12 hodín,
-  // ale neskôr sa hoursToBacktest prepíše, ak sú obidva zadané.
-  hoursToBacktest = 12,
+  hoursToBacktest = 12, // pôvodná hodnota – dynamicky prepísaná
   fromTime,
   toTime,
   dailyData,
@@ -40,83 +47,103 @@ async function runBacktest({
   min15Data,
   min5Data,
   min1Data,
-  stopLossThreshold = 0.80, // napr. 95%
-  takeProfitGain = 1.10     // napr. 110%
+  stopLossThreshold = 0.80,
+  takeProfitGain = 1.10,
+  // Nový parameter – rozhodovací interval (výpis: "30m", "15m", "5m", "1h" alebo "60m")
+  decisionTF = '15m'
 }, ws) {
   let runningPnL = 0;
-
-  // Ak sú zadané fromTime a toTime, prepočítame počet hodín
-  if (fromTime && toTime) {
-    const diffInMs = toTime - fromTime; // predpokladáme, že fromTime/toTime sú timestampy
-    hoursToBacktest = Math.floor(diffInMs / (1000 * 60 * 60));
+  
+  // Vypočítame dĺžku rozhodovacieho intervalu v ms
+  const decisionIntervalMs = timeframeToMs(decisionTF);
+  
+  // Počet intervalov = floor((toTime - fromTime) / decisionIntervalMs)
+  let intervalsToBacktest = fromTime && toTime 
+    ? Math.floor((toTime - fromTime) / decisionIntervalMs)
+    : 12;
+  
+  // Vyberieme dátovú sadu, ktorá sa použije pre rozhodovanie, podľa decisionTF.
+  // Podporované hodnoty: "5m", "15m", "30m" (agregované z 15m) a "1h"/"60m" (hodinové dáta).
+  let decisionData;
+  if (decisionTF === '5m') {
+    decisionData = min5Data;
+  } else if (decisionTF === '15m') {
+    decisionData = min15Data;
+  } else if (decisionTF === '30m') {
+    // Agregácia dvoch 15m sviečok -> 30m sviečka
+    let source = min15Data;
+    if (source.length % 2 !== 0) {
+      // Odstránime poslednú, aby bolo párne
+      source = source.slice(0, source.length - 1);
+    }
+    const aggregated30m = [];
+    for (let i = 0; i < source.length; i += 2) {
+      aggregated30m.push(aggregateCandlePairs(source[i], source[i + 1]));
+    }
+    decisionData = aggregated30m;
+  } else if (decisionTF === '1h' || decisionTF === '60m') {
+    decisionData = hourData;
+  } else {
+    throw new Error(`Unsupported decisionTF value: ${decisionTF}. Allowed values: "5m", "15m", "30m", "1h"`);
   }
-
-  // Nájdeme index prvej hodinovej sviečky, ktorej timestamp je >= fromTime
-  const fromIndex = hourData.findIndex(c => c[0] >= fromTime);
+  
+  // Nájdeme index prvej sviečky v decisionData, ktorej timestamp >= fromTime
+  const fromIndex = decisionData.findIndex(c => c[0] >= fromTime);
   if (fromIndex === -1) {
-    throw new Error(`No hour data found at or after ${tsToISO(fromTime)}`);
+    throw new Error(`No ${decisionTF} data found at or after ${tsToISO(fromTime)}`);
   }
-  console.log(`[BacktestEngine] Starting backtest from index ${fromIndex} (${tsToISO(hourData[fromIndex][0])}) for ${hoursToBacktest} hours`);
-
-  // Pomocné premenne reprezentujúce aktuálny obchodný stav
+  
+  // Obmedzíme počet intervalov tak, aby sme nepresiahli dostupné dáta
+  const availableIntervals = decisionData.length - fromIndex;
+  intervalsToBacktest = Math.min(intervalsToBacktest, availableIntervals);
+  
+  console.log(`[BacktestEngine] Starting backtest for ${symbol} from ${tsToISO(fromTime)} to ${tsToISO(toTime)} (decisionTF=${decisionTF}, interval=${decisionIntervalMs} ms), total intervals: ${intervalsToBacktest}`);
+  
+  // Obchodný stav
   let positionOpen = false;
-  let positionDirection = null; // 'BUY' alebo 'SELL'
+  let positionDirection = null;
   let positionOpenPrice = 0;
   let positionOpenTime = 0;
-
-  // 1. Spustíme paralelne „hour tasks“ – každá úloha je izolovaná a získa
-  //    GPT analýzu pre danú hodinu. Neovplyvňujú však navzájom obchodný stav.
-  const hourTasks = [];
-  for (let i = 0; i < hoursToBacktest; i++) {
+  
+  // 1. Spustíme paralelne "interval tasks" – každá úloha spracúva jeden rozhodovací interval.
+  const intervalTasks = [];
+  for (let i = 0; i < intervalsToBacktest; i++) {
     const curIndex = fromIndex + i;
-    // Každá úloha spracuje len dáta do aktuálnej hodiny (slice) a vráti
-    // výsledok, ktorý obsahuje:
-    // - číslo iterácie, aktuálny timestamp (hourCandle[0])
-    // - celú hodinovú sviečku (hourCandle)
-    // - odporúčanie GPT (finalAction) pre danú hodinu
-    hourTasks.push((async () => {
-      const hourCandle = hourData[curIndex];
-      if (!hourCandle) return null;
-      const lastHourTS = hourCandle[0];
+    intervalTasks.push((async () => {
+      const decisionCandle = decisionData[curIndex];
+      if (!decisionCandle) return null;
+      const lastDecisionTS = decisionCandle[0];
       const analysis = await analyzeSymbolChain(
         symbol,
-        dailyData.slice(),    // použijeme všetky denné dáta
-        weeklyData.slice(),   // všetky týždenné dáta
-        min15Data.slice(),    // 15-minutové dáta
+        dailyData.slice(),
+        weeklyData.slice(),
+        min15Data.slice(),
         hourData.slice(0, curIndex + 1),
         min5Data.slice(),
         fromTime,
-        toTime,
+        toTime
       );
-      if (!analysis || !analysis.synergy || typeof analysis.synergy.final_action === 'undefined') {
-        throw new Error(`Missing final_action in analysis for iteration ${i}: analysis=${JSON.stringify(analysis)}`);
+      if (!analysis || !analysis.gptOutput || typeof analysis.gptOutput.final_action === 'undefined') {
+        throw new Error(`Missing final_action in analysis for interval iteration ${i}: analysis=${JSON.stringify(analysis)}`);
       }
-      const finalAction = analysis.synergy.final_action;
-      return {
-        i,
-        lastHourTS,
-        hourCandle,
-        finalAction,
-        analysis
-      };
+      const finalAction = analysis.gptOutput.final_action;
+      return { i, lastDecisionTS, decisionCandle, finalAction, analysis };
     })());
   }
-
-  // Všetky úlohy bežia paralelne
-  const hourResults = await Promise.all(hourTasks);
-  // Zoradíme výsledky podľa iterácie, aby sme ich mohli spracovať sekvenčne
-  hourResults.sort((a, b) => a.i - b.i);
-
-  // 2. Sekvenčne prechádzame výsledky – tu aktualizujeme obchodný stav,
-  //    vykonávame kontrolu 1-min dát, uzatvárame/otvárame obchody, počítame PnL, atď.
-  for (const res of hourResults) {
-    if (!res) continue;
-    const { i, lastHourTS, hourCandle, finalAction } = res;
-    console.log(`[BacktestEngine] Hour iteration ${i} at ${tsToISO(lastHourTS)} – GPT recommends: ${finalAction}`);
-
-    // Ak zatiaľ nie je otvorená žiadna pozícia a GPT odporúča BUY/SELL, otvoríme ju
+  
+  // Počkame na dokončenie všetkých interval tasks a filtrovanie null hodnôt
+  const rawIntervalResults = await Promise.all(intervalTasks);
+  const intervalResults = rawIntervalResults.filter(r => r !== null);
+  intervalResults.sort((a, b) => a.i - b.i);
+  
+  // 2. Sekvenčné spracovanie – vyhodnocovanie 1-minútových dát pre každý interval
+  for (const res of intervalResults) {
+    const { i, lastDecisionTS, decisionCandle, finalAction } = res;
+    console.log(`[BacktestEngine] Interval iteration ${i} (${decisionTF}) at ${tsToISO(lastDecisionTS)} – GPT recommends: ${finalAction}`);
+    
+    // Otváranie obchodu, ak nie je otvorená pozícia a odporúča BUY/SELL
     if (!positionOpen && (finalAction === 'BUY' || finalAction === 'SELL')) {
-      const openTime = lastHourTS + timeframeToMs('1h'); // obchod sa otvorí v nasledujúcej hodine
+      const openTime = lastDecisionTS + decisionIntervalMs;
       const openPrice = find1mClosePriceAtTime(min1Data, openTime);
       if (openPrice !== null) {
         positionOpen = true;
@@ -126,39 +153,34 @@ async function runBacktest({
         console.log(`[BacktestEngine] Opened ${positionDirection} position at ${openPrice} on ${tsToISO(openTime)}`);
       }
     }
-
-    // Spracovanie obchodov pre aktuálnu hodinu:
+    
+    // Spracovanie 1-minútových dát v rámci tohto intervalu
     let summaryRow = null;
     let tradeClosed = false;
     let triggerCandle = null;
     if (positionOpen) {
-      // Definujeme rozsah aktuálnej hodiny a získame všetky 1-minútové candles pre túto hodinu
-      const hourStart = lastHourTS;
-      const hourEnd = hourStart + timeframeToMs('1h');
+      const intervalStart = lastDecisionTS;
+      const intervalEnd = intervalStart + decisionIntervalMs;
       const oneMinCandles = min1Data
-          .filter(c => c[0] >= hourStart && c[0] < hourEnd)
-          .sort((a, b) => a[0] - b[0]);
+        .filter(c => c[0] >= intervalStart && c[0] < intervalEnd)
+        .sort((a, b) => a[0] - b[0]);
       
-      // Definujeme stop loss / take profit podľa smeru
       let slPrice, tpPrice;
-  if (res.analysis?.gptOutput?.stop_loss != null && res.analysis.gptOutput.target_profit != null) {
-    // Použijeme priamo absolútne hodnoty z gptServiceOffline
-    slPrice = res.analysis.gptOutput.stop_loss;
-    tpPrice = res.analysis.gptOutput.target_profit;
-    console.log(`[BacktestEngine] Using GPT-defined stop loss: ${slPrice} and target profit: ${tpPrice}`);
-  } else {
-    // Fallback – použijeme default multiplikátory založené na otvorenej cene
-    if (positionDirection === 'BUY') {
-      slPrice = positionOpenPrice * stopLossThreshold;
-      tpPrice = positionOpenPrice * takeProfitGain;
-    } else { // pre short pozície
-      slPrice = positionOpenPrice / stopLossThreshold;
-      tpPrice = positionOpenPrice / takeProfitGain;
-    }
-    console.log(`[BacktestEngine] Using default multipliers: stop loss=${slPrice}, target profit=${tpPrice}`);
-  }
+      if (res.analysis?.gptOutput?.stop_loss != null && res.analysis.gptOutput.target_profit != null) {
+        slPrice = res.analysis.gptOutput.stop_loss;
+        tpPrice = res.analysis.gptOutput.target_profit;
+        console.log(`[BacktestEngine] Using GPT-defined stop loss: ${slPrice} and target profit: ${tpPrice}`);
+      } else {
+        if (positionDirection === 'BUY') {
+          slPrice = positionOpenPrice * stopLossThreshold;
+          tpPrice = positionOpenPrice * takeProfitGain;
+        } else {
+          slPrice = positionOpenPrice / stopLossThreshold;
+          tpPrice = positionOpenPrice / takeProfitGain;
+        }
+        console.log(`[BacktestEngine] Using default multipliers: stop loss=${slPrice}, target profit=${tpPrice}`);
+      }
       
-      // Prejdeme všetky 1-min candle tejto hodiny a skontrolujeme podmienky pre uzatvorenie
       for (const candle of oneMinCandles) {
         const candleClose = candle[4];
         const candleHigh = candle[2];
@@ -171,7 +193,7 @@ async function runBacktest({
             triggerCandle = candle;
             break;
           }
-        } else { // SELL
+        } else {
           if (candleHigh >= slPrice || candleLow <= tpPrice) {
             tradeClosed = true;
             triggerCandle = candle;
@@ -180,8 +202,6 @@ async function runBacktest({
         }
       }
       
-      // Zvolíme 1-min candle pre "summary". Ak trade bol uzavretý, vyberieme trigger;
-      // inak poslednú 1-min candle v danom období.
       let summaryCandle = null;
       if (tradeClosed && triggerCandle) {
         summaryCandle = triggerCandle;
@@ -191,9 +211,7 @@ async function runBacktest({
       
       if (summaryCandle) {
         const summaryPnL = computePnL(positionDirection, positionOpenPrice, summaryCandle[4]);
-        if (tradeClosed) {
-          runningPnL += summaryPnL;
-        }
+        if (tradeClosed) runningPnL += summaryPnL;
         summaryRow = {
           iteration: i,
           timestamp: tsToISO(summaryCandle[0]),
@@ -207,7 +225,6 @@ async function runBacktest({
         };
         if (tradeClosed) {
           console.log(`[BacktestEngine] Closed ${positionDirection} at ${summaryCandle[4]} on ${tsToISO(summaryCandle[0])} with PnL: ${summaryPnL.toFixed(2)}%`);
-          // Aktualizujeme stav – uzatvárame otvorenú pozíciu
           positionOpen = false;
           positionDirection = null;
           positionOpenPrice = 0;
@@ -216,41 +233,39 @@ async function runBacktest({
       }
     }
     
-    // Ak počas tejto hodiny nedošlo k žiadnemu obchodnému kroku, vytvoríme len riadok s HOLD
     if (!positionOpen && !summaryRow) {
       summaryRow = {
         iteration: i,
-        timestamp: tsToISO(lastHourTS),
-        openPrice: hourCandle[4],
-        closePrice: hourCandle[4],
+        timestamp: tsToISO(lastDecisionTS),
+        openPrice: decisionCandle[4],
+        closePrice: decisionCandle[4],
         tradePnLPercent: 0,
         runningPnLPercent: runningPnL,
         position: "HOLD",
         holdPosition: "No Trade",
-        closedAt: tsToISO(lastHourTS)
+        closedAt: tsToISO(lastDecisionTS)
       };
     }
     
-    // Odošleme výsledný riadok cez WebSocket
     if (summaryRow) {
       ws.send(JSON.stringify({ type: 'update', data: summaryRow }));
     }
-  } // koniec sekvenčného spracovania jednotlivých hodín
-
+  }
+  
   // Ak pozícia zostáva otvorená, vynútime jej uzavretie
   if (positionOpen) {
-    const lastHourCandle = hourData[fromIndex + hoursToBacktest - 1];
+    const lastDecisionCandle = decisionData[fromIndex + intervalsToBacktest - 1];
     let finalClosePrice = positionOpenPrice;
-    if (lastHourCandle) {
-      const theoreticalCloseTime = lastHourCandle[0] + timeframeToMs('1h');
+    if (lastDecisionCandle) {
+      const theoreticalCloseTime = lastDecisionCandle[0] + decisionIntervalMs;
       const foundPrice = find1mClosePriceAtTime(min1Data, theoreticalCloseTime);
       if (foundPrice !== null) finalClosePrice = foundPrice;
     }
     const finalTradePnL = computePnL(positionDirection, positionOpenPrice, finalClosePrice);
     runningPnL += finalTradePnL;
     const finalRow = {
-      iteration: hoursToBacktest,
-      timestamp: lastHourCandle ? tsToISO(lastHourCandle[0]) : 'N/A',
+      iteration: intervalsToBacktest,
+      timestamp: lastDecisionCandle ? tsToISO(lastDecisionCandle[0]) : 'N/A',
       openPrice: positionOpenPrice,
       closePrice: finalClosePrice,
       tradePnLPercent: finalTradePnL,
@@ -262,8 +277,7 @@ async function runBacktest({
     ws.send(JSON.stringify({ type: 'update', data: finalRow }));
     console.log(`[BacktestEngine] Forced close position with PnL: ${finalTradePnL.toFixed(2)}%`);
   }
-
-  // Nakoniec odošleme finálnu správu cez WebSocket s konečným runningPnL
+  
   ws.send(JSON.stringify({ type: 'final', runningPnL }));
 }
 
