@@ -52,47 +52,62 @@ const {
   }
   
   // (C) offlineIndicatorsForTimeframe (15m/1h/...)
-  function offlineIndicatorsForTimeframe(ohlcvSlice, timeframeLabel='offline') {
-    if (!ohlcvSlice || ohlcvSlice.length === 0) {
+  function offlineIndicatorsForTimeframe(ohlcvSlice, timeframeLabel = 'offline') {
+    if (!ohlcvSlice) {
       throw new Error(`No data for timeframe=${timeframeLabel}`);
     }
+    
+    // If ohlcvSlice is not an array, try converting it using Object.values
+    if (!Array.isArray(ohlcvSlice)) {
+      if (typeof ohlcvSlice === 'object' && ohlcvSlice !== null) {
+        // Log the original value to help with debugging
+        console.warn(`ohlcvSlice for timeframe=${timeframeLabel} is not an array. Attempting to convert using Object.values.`);
+        ohlcvSlice = Object.values(ohlcvSlice);
+      } else {
+        throw new Error(`ohlcvSlice is not an array for timeframe=${timeframeLabel}`);
+      }
+    }
+    
+    if (ohlcvSlice.length === 0) {
+      throw new Error(`No data for timeframe=${timeframeLabel}`);
+    }
+    
+    // Map OHLCV values (expecting each entry is an array: [ts, open, high, low, close, volume])
     const highs   = ohlcvSlice.map(c => c[2]);
     const lows    = ohlcvSlice.map(c => c[3]);
     const closes  = ohlcvSlice.map(c => c[4]);
     const volumes = ohlcvSlice.map(c => c[5]);
   
-    // RSI(14)
+    // Calculate indicators
     const rsiData = RSI.calculate({ values: closes, period: 14 });
     const lastRSI = safeLast(rsiData);
   
-    // MACD
     const macdData = MACD.calculate({
       fastPeriod: 12, slowPeriod: 26, signalPeriod: 9,
-      SimpleMAOscillator:false, SimpleMASignal:false,
+      SimpleMAOscillator: false, SimpleMASignal: false,
       values: closes
     });
     const lastMACD = safeLast(macdData);
   
-    // SMA20, EMA50, Boll, etc...
-    const sma20 = SMA.calculate({ period:20, values: closes });
+    const sma20 = SMA.calculate({ period: 20, values: closes });
     const lastSMA20 = safeLast(sma20);
   
-    const ema50 = EMA.calculate({ period:50, values: closes });
+    const ema50 = EMA.calculate({ period: 50, values: closes });
     const lastEMA50 = safeLast(ema50);
   
-    const bollData = BollingerBands.calculate({ period:20, values: closes, stdDev:2 });
+    const bollData = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
     const lastBoll = safeLast(bollData);
   
-    const adxData = ADX.calculate({ close:closes, high:highs, low:lows, period:14 });
+    const adxData = ADX.calculate({ close: closes, high: highs, low: lows, period: 14 });
     const lastADX = safeLast(adxData);
   
-    const stoData = Stochastic.calculate({ high: highs, low: lows, close: closes, period:14, signalPeriod:3 });
+    const stoData = Stochastic.calculate({ high: highs, low: lows, close: closes, period: 14, signalPeriod: 3 });
     const lastStochastic = safeLast(stoData);
   
-    const atrData = ATR.calculate({ high:highs, low:lows, close:closes, period:14 });
+    const atrData = ATR.calculate({ high: highs, low: lows, close: closes, period: 14 });
     const lastATR = safeLast(atrData);
   
-    const mfiData = MFI.calculate({ high:highs, low:lows, close:closes, volume:volumes, period:14 });
+    const mfiData = MFI.calculate({ high: highs, low: lows, close: closes, volume: volumes, period: 14 });
     const lastMFI = safeLast(mfiData);
   
     const obvData = OBV.calculate({ close: closes, volume: volumes });

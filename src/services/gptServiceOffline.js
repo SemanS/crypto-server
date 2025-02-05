@@ -1,27 +1,27 @@
 const OpenAI = require('openai');
 const { formatTS } = require('../utils/timeUtils');
-const {
-  offlineDailyStats,
-  offlineWeeklyStats,
-  offlineIndicatorsForTimeframe
-} = require('./offlineIndicators');
+const { offlineDailyStats, offlineWeeklyStats, offlineIndicatorsForTimeframe } = require('./offlineIndicators');
 
-// Vytvoríme jednorazovú inštanciu OpenAI klienta
 const openAiClient = new OpenAI({
   organization: process.env.OPENAI_ORGANIZATION,
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// --------------------------------------------------------
-// PROMPT GENERATORY
-// --------------------------------------------------------
+// Helper function for consistent number formatting
+function formatNumber(num) {
+  return Number(num.toFixed(4));
+}
 
-// Vytvorí prompt pre dennú analýzu na základe štatistík
+// ------------------------------
+// PROMPT GENERATORS
+// ------------------------------
+
+// Daily prompt remains the same
 function buildDailyPrompt(symbol, dailyStats) {
   const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
   return `
 Daily stats for ${symbol}:
-mean=${meanVal.toFixed(4)}, stdev=${stdevVal.toFixed(4)}, min=${minVal.toFixed(4)}, max=${maxVal.toFixed(4)}, skew=${skewVal.toFixed(4)}, kurt=${kurtVal.toFixed(4)}
+mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
 
 Please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
 {
@@ -32,12 +32,12 @@ Please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short r
 `;
 }
 
-// Vytvorí prompt pre týždennú analýzu
+// Weekly prompt remains the same
 function buildWeeklyPrompt(symbol, weeklyStats) {
   const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = weeklyStats;
   return `
 Weekly stats for ${symbol}:
-mean=${meanVal.toFixed(4)}, stdev=${stdevVal.toFixed(4)}, min=${minVal.toFixed(4)}, max=${maxVal.toFixed(4)}, skew=${skewVal.toFixed(4)}, kurt=${kurtVal.toFixed(4)}
+mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
 
 Please provide a "weekly_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
 {
@@ -48,83 +48,142 @@ Please provide a "weekly_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short 
 `;
 }
 
-// Vytvorí krátky prehľad indikátorov pre daný timeframe
+// Generic function for indicator summary (for all timeframes)
 function buildIndicatorSummary(tfData) {
   if (!tfData) return 'N/A';
+  let summary = `timeframe=${tfData.timeframe}, close=${formatNumber(tfData.lastClose)}\n`;
   
-  let summary = `timeframe=${tfData.timeframe}, close=${tfData.lastClose?.toFixed(4)}\n`;
-  
-  // Trendové indikátory
-  if (tfData.lastEMA9) summary += `EMA9=${tfData.lastEMA9.toFixed(2)}\n`;
-  if (tfData.lastEMA21) summary += `EMA21=${tfData.lastEMA21.toFixed(2)}\n`;
-  if (tfData.lastEMA50) summary += `EMA50=${tfData.lastEMA50.toFixed(2)}\n`;
-  if (tfData.lastEMA200) summary += `EMA200=${tfData.lastEMA200.toFixed(2)}\n`;
-  if (tfData.lastSupertrend) summary += `Supertrend=${tfData.lastSupertrend.toFixed(2)}\n`;
-  if (tfData.lastPSAR) summary += `PSAR=${tfData.lastPSAR.toFixed(2)}\n`;
-  if (tfData.lastVWAP) summary += `VWAP=${tfData.lastVWAP.toFixed(2)}\n`;
-  if (tfData.lastHMA) summary += `HMA=${tfData.lastHMA.toFixed(2)}\n`;
-  
-  // Oscilátory
-  if (tfData.lastRSI) summary += `RSI=${tfData.lastRSI.toFixed(2)}\n`;
-  if (tfData.lastMACD) {
-    summary += `MACD=${tfData.lastMACD.MACD?.toFixed(2)}, signal=${tfData.lastMACD.signal?.toFixed(2)}, hist=${tfData.lastMACD.histogram?.toFixed(2)}\n`;
+  if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
+  if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
+  if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
+  if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
+  if (tfData.lastSupertrend !== undefined) summary += `Supertrend=${formatNumber(tfData.lastSupertrend)}\n`;
+  if (tfData.lastPSAR !== undefined) summary += `PSAR=${formatNumber(tfData.lastPSAR)}\n`;
+  if (tfData.lastVWAP !== undefined) summary += `VWAP=${formatNumber(tfData.lastVWAP)}\n`;
+  if (tfData.lastHMA !== undefined) summary += `HMA=${formatNumber(tfData.lastHMA)}\n`;
+  if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
+  if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
+    summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
   }
   if (tfData.lastStochastic) {
-    summary += `Stoch: K=${tfData.lastStochastic.k?.toFixed(2)}, D=${tfData.lastStochastic.d?.toFixed(2)}\n`;
+    summary += `Stoch: K=${formatNumber(tfData.lastStochastic.k)}, D=${formatNumber(tfData.lastStochastic.d)}\n`;
   }
-  
-  // Objemové indikátory
-  if (tfData.lastOBV) summary += `OBV=${tfData.lastOBV.toFixed(2)}\n`;
-  if (tfData.lastMFI) summary += `MFI=${tfData.lastMFI.toFixed(2)}\n`;
-  
-  // Volatilné indikátory
+  if (tfData.lastOBV !== undefined) summary += `OBV=${formatNumber(tfData.lastOBV)}\n`;
+  if (tfData.lastMFI !== undefined) summary += `MFI=${formatNumber(tfData.lastMFI)}\n`;
   if (tfData.lastBoll) {
-    summary += `Bollinger Bands: lower=${tfData.lastBoll.lower?.toFixed(2)}, mid=${tfData.lastBoll.mid?.toFixed(2)}, upper=${tfData.lastBoll.upper?.toFixed(2)}\n`;
-  }
+        const lower = tfData.lastBoll.lower !== undefined ? formatNumber(tfData.lastBoll.lower) : 'N/A';
+        const mid   = tfData.lastBoll.mid !== undefined ? formatNumber(tfData.lastBoll.mid) : 'N/A';
+        const upper = tfData.lastBoll.upper !== undefined ? formatNumber(tfData.lastBoll.upper) : 'N/A';
+        summary += `Bollinger Bands: lower=${lower}, mid=${mid}, upper=${upper}\n`;
+      }
   if (tfData.lastADX) {
-    summary += `ADX=${tfData.lastADX.adx?.toFixed(2)}, +DI=${tfData.lastADX.pdi?.toFixed(2)}, -DI=${tfData.lastADX.mdi?.toFixed(2)}\n`;
+    summary += `ADX=${formatNumber(tfData.lastADX.adx)}, +DI=${formatNumber(tfData.lastADX.pdi)}, -DI=${formatNumber(tfData.lastADX.mdi)}\n`;
   }
-  if (tfData.lastATR) summary += `ATR=${tfData.lastATR.toFixed(2)}\n`;
-  
-  // Indikátory pre scalping
-  if (tfData.lastCCI) summary += `CCI=${tfData.lastCCI.toFixed(2)}\n`;
-  if (tfData.lastWilliamsR) summary += `Williams %R=${tfData.lastWilliamsR.toFixed(2)}\n`;
+  if (tfData.lastATR !== undefined) summary += `ATR=${formatNumber(tfData.lastATR)}\n`;
+  if (tfData.lastCCI !== undefined) summary += `CCI=${formatNumber(tfData.lastCCI)}\n`;
+  if (tfData.lastWilliamsR !== undefined) summary += `Williams %R=${formatNumber(tfData.lastWilliamsR)}\n`;
   if (tfData.lastKeltner) {
-    summary += `Keltner Channel: lower=${tfData.lastKeltner.lower?.toFixed(2)}, mid=${tfData.lastKeltner.mid?.toFixed(2)}, upper=${tfData.lastKeltner.upper?.toFixed(2)}\n`;
+    summary += `Keltner Channel: lower=${formatNumber(tfData.lastKeltner.lower)}, mid=${formatNumber(tfData.lastKeltner.mid)}, upper=${formatNumber(tfData.lastKeltner.upper)}\n`;
   }
   if (tfData.lastDonchian) {
-    summary += `Donchian: min=${tfData.lastDonchian.min?.toFixed(2)}, max=${tfData.lastDonchian.max?.toFixed(2)}\n`;
+    summary += `Donchian: min=${formatNumber(tfData.lastDonchian.min)}, max=${formatNumber(tfData.lastDonchian.max)}\n`;
   }
   if (tfData.lastTTMSqueeze !== undefined) summary += `TTM Squeeze=${tfData.lastTTMSqueeze}\n`;
   if (tfData.lastIchimoku) {
-    summary += `Ichimoku: Tenkan=${tfData.lastIchimoku.tenkan?.toFixed(2)}, Kijun=${tfData.lastIchimoku.kijun?.toFixed(2)}\n`;
+    summary += `Ichimoku: Tenkan=${formatNumber(tfData.lastIchimoku.tenkan)}, Kijun=${formatNumber(tfData.lastIchimoku.kijun)}\n`;
   }
   if (tfData.lastScalperDream !== undefined) summary += `Scalper Dream=${tfData.lastScalperDream}\n`;
   
   return summary;
 }
 
-// Kombinuje všetky analyzy do finálneho synergického promptu
-function buildFinalSynergyPrompt(symbol, dailyMacro, weeklyMacro, tf15m, tf1h, fromTime, toTime, fundamentals) {
+// ------------------------------
+// NEW MACRO PROMPT FUNCTIONS (for 5m, 15m, and hourly) with recommendations
+// ------------------------------
+
+/* 5-minute macro for scalping (high volatility) */
+function build5mMacroPrompt(symbol, min5Indicators) {
+  const summary = buildIndicatorSummary(min5Indicators);
+  return `
+5-minute summary (Scalping, high volatility) for ${symbol}:
+Indicators considered:
+- EMA9 and EMA21: Short-term moving averages to quickly identify trend direction.
+- VWAP: Volume Weighted Average Price to determine average price based on volume.
+- RSI (7 or 14): To identify overbought (above 70) or oversold (below 30) conditions.
+- Bollinger Bands (20,2): To detect breakouts and volatility squeezes.
+- MACD (12,26,9): Crossovers can indicate short-term momentum shifts.
+Strategy: Look for breakouts through Bollinger Bands and confirm entry with VWAP and a MACD crossover.
+Computed indicators summary:
+${summary}
+
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
+{
+  "macro_view": "...",
+  "macro_comment": "..."
+}
+(No extra text.)
+`;
+}
+
+/* 15-minute macro for intraday trading/swing */
+function build15mMacroPrompt(symbol, min15Indicators) {
+  const summary = buildIndicatorSummary(min15Indicators);
+  return `
+15-minute summary (Intraday Trading, Swing) for ${symbol}:
+Indicators considered:
+- EMA20 and EMA50: Identify short-term and mid-term trends.
+- Fibonacci retracement levels (e.g., 0.618): To find potential entry correction levels.
+- RSI (14) and Stochastic RSI (3,3,14,14): To detect extreme conditions and momentum shifts.
+- OBV: For accumulation/distribution of volume.
+- ATR: To measure market volatility.
+Strategy: Use Fibonacci retracement for corrections and confirm the trend with EMA and RSI divergence.
+Computed indicators summary:
+${summary}
+
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
+{
+  "macro_view": "...",
+  "macro_comment": "..."
+}
+(No extra text.)
+`;
+}
+
+/* Hourly macro for swing trading/momentum */
+function buildHourlyMacroPrompt(symbol, hourlyIndicators) {
+  const summary = buildIndicatorSummary(hourlyIndicators);
+  return `
+Hourly summary (Swing Trading, Momentum) for ${symbol}:
+Indicators considered:
+- EMA50 and EMA200: To identify the long-term trend.
+- Ichimoku Cloud: For support, resistance, and overall market sentiment.
+- RSI (14) with divergence analysis: To spot potential trend reversals.
+- Volume Profile (VPVR): To reveal key liquidity zones and points of control (POC).
+- MACD (12,26,9) and Histogram: For momentum and confirmation of crossovers.
+Strategy: Wait for trend confirmation via an EMA crossover, then enter after retesting key VPVR levels.
+Computed indicators summary:
+${summary}
+
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
+{
+  "macro_view": "...",
+  "macro_comment": "..."
+}
+(No extra text.)
+`;
+}
+
+// Final synergy prompt (kept as before)
+function buildFinalSynergyPrompt(symbol, dailyMacro, weeklyMacro, tf15m, tf1h, fromTime, toTime) {
   const dailySummary = `macro_view=${dailyMacro.macro_view}, reason=${dailyMacro.macro_comment}`;
   const weeklySummary = `weekly_view=${weeklyMacro.weekly_view}, reason=${weeklyMacro.weekly_comment}`;
   const sum15m = buildIndicatorSummary(tf15m);
   const sum1h = buildIndicatorSummary(tf1h);
-
   let dateRangeText = '';
   if (fromTime || toTime) {
     const fromTxt = fromTime ? formatTS(fromTime) : 'N/A';
     const toTxt = toTime ? formatTS(toTime) : 'N/A';
     dateRangeText = `Offline data timeframe: from ${fromTxt} to ${toTxt}.\n`;
-  }
-  
-  let fundamentalsText = '';
-  if (fundamentals && fundamentals.articles && fundamentals.articles.length > 0) {
-    fundamentalsText = 'Fundamental/News articles:\n';
-    fundamentals.articles.forEach((art, idx) => {
-      fundamentalsText += `#${idx + 1} - "${art.title}" from ${art.source?.name || 'unknown'}, published at ${art.publishedAt}\n`;
-    });
-    fundamentalsText += '\nIncorporate relevant news into your conclusion.\n';
   }
   
   return `
@@ -141,13 +200,12 @@ ${sum15m}
 ${sum1h}
 
 ${dateRangeText}
-${fundamentalsText}
 
 Dynamic Weighting Instructions:
-- Base weights (initially): Daily Macro = 30%, Weekly Macro = 40%, Short-term (15m + 1h) = 30%.
+- Base weights (initially): Daily Macro = 20%, Weekly Macro = 20%, Short-term (5m + 15m + 1h) = 60%.
 - Adjust weights based on market volatility (for example, if ATR is high, weight short-term signals higher).
 - Factor in momentum from advanced indicators (EMA crossovers, MACD, etc.) and volume data.
-- Incorporate fundamental news where applicable.
+- Incorporate fundamental news when applicable.
 
 Risk Management:
 - Assess current price in relation to ATR and Bollinger Bands.
@@ -164,128 +222,186 @@ Combine all the above into one final conclusion. Return JSON in the following fo
 `;
 }
 
-// --------------------------------------------------------
-// FUNKCIA NA VOLANIE OPENAI API
-// --------------------------------------------------------
+// ------------------------------
+// CALL OPENAI API function
+// ------------------------------
 async function callOpenAI(prompt) {
-  try {
-    console.log('[GPTService] Sending prompt to OpenAI:', prompt);
-    const response = await openAiClient.chat.completions.create({
-      model: 'o3-mini',
-      messages: [{ role: 'user', content: prompt }]
-    });
-    let raw = response.choices[0]?.message?.content || '';
-    // Odstráni prípadné bloky s kódom (napr. "```")
-    raw = raw.replace(/```(\w+)?/g, '').trim();
-    return JSON.parse(raw);
-  } catch (err) {
-    console.warn('[GPTService] Error calling OpenAI:', err.message);
-    return null;
+    try {
+      console.log("[GPTServiceOffline] Sending prompt to OpenAI:\n", prompt);
+      
+      const response = await openAiClient.chat.completions.create({
+        model: "o3-mini", // use the same model as online
+        messages: [{ role: "user", content: prompt }]
+      });
+      console.log("[GPTServiceOffline] Raw response from OpenAI:", response);
+  
+      let raw = response.choices[0]?.message?.content || "";
+      console.log("[GPTServiceOffline] Raw content extracted:", raw);
+  
+      // Clean the response from extra markdown formatting:
+      raw = raw.replace(/```(\w+)?/g, "").trim();
+      console.log("[GPTServiceOffline] Cleaned raw content:", raw);
+      
+      // Parse JSON and log the result:
+      const parsed = JSON.parse(raw);
+      console.log("[GPTServiceOffline] Parsed JSON:", parsed);
+      return parsed;
+    } catch (err) {
+      console.warn("[GPTServiceOffline] Error calling OpenAI:", err.message);
+      return null;
+    }
   }
-}
-
-// --------------------------------------------------------
-// HLAVNÁ FUNKCIA: gptServiceOffline
-// --------------------------------------------------------
-/*
-  Funkcia gptServiceOffline spája offline štatistiky a indikátory a vytvára
-  finálny synergický prompt, ktorý odošle do OpenAI pomocou callOpenAI.
   
-  Parametre:
-    symbol          - názov páru/symbolu
-    dailyDataSlice  - denné dáta pre backtest (pole)
-    weeklyDataSlice - týždenné dáta pre backtest (pole)
-    min15DataSlice  - 15minutové dáta
-    hourDataSlice   - hodinové dáta
-    fromTime, toTime- časové obdobie (užitočné pre prompt)
-    fundamentals    - objekt s fundamentálnymi článkami/news (voliteľné)
+  // MAIN FUNCTION: analyzeSymbolChain – with added console logging
+  async function analyzeSymbolChain(
+    symbol,
+    dailyDataSlice,
+    weeklyDataSlice,
+    min15DataSlice,
+    hourDataSlice,
+    min5DataSlice,  // NEW parameter for 5-minute data
+    fromTime,
+    toTime
+  ) {
+    console.log("[GPTServiceOffline] Starting analyzeSymbolChain for:", symbol);
+    
+    // Calculate statistics
+    const dailyStats = offlineDailyStats(dailyDataSlice);
+    console.log("[GPTServiceOffline] Calculated dailyStats:", dailyStats);
+    const weeklyStats = offlineWeeklyStats(weeklyDataSlice);
+    console.log("[GPTServiceOffline] Calculated weeklyStats:", weeklyStats);
   
-  Vráti objekt s gptOutput (final_action, stop_loss, target_profit, comment)
-  a dodatočnými štatistikami.
-*/
-async function gptServiceOffline(
-  symbol,
-  dailyDataSlice,
-  weeklyDataSlice,
-  min15DataSlice,
-  hourDataSlice,
-  fromTime,
-  toTime,
-  fundamentals
-) {
-  // Vypočítame denné a týždenné štatistiky
-  const dailyStats = offlineDailyStats(dailyDataSlice);
-  const weeklyStats = offlineWeeklyStats(weeklyDataSlice);
+    // Build the prompt strings
+    const dailyPrompt = buildDailyPrompt(symbol, dailyStats);
+    console.log("[GPTServiceOffline] Built daily prompt:", dailyPrompt);
+    const weeklyPrompt = buildWeeklyPrompt(symbol, weeklyStats);
+    console.log("[GPTServiceOffline] Built weekly prompt:", weeklyPrompt);
   
-  // Zostavíme prompt pre dennú a týždennú analýzu a spustíme paralelné API volania
-  const dailyPromise = callOpenAI(buildDailyPrompt(symbol, dailyStats))
-    .catch(err => {
-      console.error('[GPTService] Daily analysis error:', err.message);
-      return { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
+    // Get daily and weekly macro responses
+    const dailyPromise = callOpenAI(dailyPrompt).catch((err) => {
+      console.error("[GPTServiceOffline] Daily analysis error:", err.message);
+      return { macro_view: "NEUTRAL", macro_comment: "No macro" };
     });
-  const weeklyPromise = callOpenAI(buildWeeklyPrompt(symbol, weeklyStats))
-    .catch(err => {
-      console.error('[GPTService] Weekly analysis error:', err.message);
-      return { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
+    const weeklyPromise = callOpenAI(weeklyPrompt).catch((err) => {
+      console.error("[GPTServiceOffline] Weekly analysis error:", err.message);
+      return { weekly_view: "NEUTRAL", weekly_comment: "No weekly" };
     });
   
-  // Paralelne získame indikátory pre timeframe 15m a 1h
-  const [tf15m, tf1h] = await Promise.all([
-    Promise.resolve(offlineIndicatorsForTimeframe(min15DataSlice, '15m'))
-      .catch(err => {
-        console.warn('[GPTService] 15m indicator error:', err.message);
+    // Get indicators for 15m, 1h, and 5m timeframes in parallel:
+    console.log("[GPTServiceOffline] Starting to fetch indicator data for 15m, 1h, and 5m");
+    const [tf15m, tf1h, tf5m] = await Promise.all([
+      Promise.resolve(offlineIndicatorsForTimeframe(min15DataSlice, "15m")).catch((err) => {
+        console.warn("[GPTServiceOffline] 15m indicator error:", err.message);
         return null;
       }),
-    Promise.resolve(offlineIndicatorsForTimeframe(hourDataSlice, '1h'))
-      .catch(err => {
-        console.warn('[GPTService] 1h indicator error:', err.message);
+      Promise.resolve(offlineIndicatorsForTimeframe(hourDataSlice, "1h")).catch((err) => {
+        console.warn("[GPTServiceOffline] 1h indicator error:", err.message);
         return null;
-      })
-  ]);
+      }),
+      Promise.resolve(offlineIndicatorsForTimeframe(min5DataSlice, "5m")).catch((err) => {
+        console.warn("[GPTServiceOffline] 5m indicator error:", err.message);
+        return null;
+      }),
+    ]);
+    console.log("[GPTServiceOffline] Retrieved indicators for 15m:", tf15m, "1h:", tf1h, "5m:", tf5m);
   
-  const [dailyResult, weeklyResult] = await Promise.all([dailyPromise, weeklyPromise]);
+    const [dailyResult, weeklyResult] = await Promise.all([dailyPromise, weeklyPromise]);
+    console.log("[GPTServiceOffline] Daily result:", dailyResult, "Weekly result:", weeklyResult);
+    
+    const dailyMacro = dailyResult || {
+      macro_view: "NEUTRAL",
+      macro_comment: "No macro"
+    };
+    const weeklyMacro = weeklyResult || {
+      weekly_view: "NEUTRAL",
+      weekly_comment: "No weekly"
+    };
   
-  const dailyMacro = dailyResult || { macro_view: 'NEUTRAL', macro_comment: 'No macro' };
-  const weeklyMacro = weeklyResult || { weekly_view: 'NEUTRAL', weekly_comment: 'No weekly' };
-
-  // Vytvoríme finálny synergy prompt
-  const synergyPrompt = buildFinalSynergyPrompt(
-    symbol,
-    dailyMacro,
-    weeklyMacro,
-    tf15m,
-    tf1h,
-    fromTime,
-    toTime,
-    fundamentals
-  );
+    // Build macro prompts for hourly, 15m and 5m timeframes
+    const hourlyMacroPrompt = buildHourlyMacroPrompt(symbol, tf1h);
+    console.log("[GPTServiceOffline] Built hourly macro prompt:", hourlyMacroPrompt);
+    const min15MacroPrompt = build15mMacroPrompt(symbol, tf15m);
+    console.log("[GPTServiceOffline] Built 15m macro prompt:", min15MacroPrompt);
+    const min5MacroPrompt = build5mMacroPrompt(symbol, tf5m);
+    console.log("[GPTServiceOffline] Built 5m macro prompt:", min5MacroPrompt);
+    
+    const hourlyMacroPromise = callOpenAI(hourlyMacroPrompt).catch((err) => {
+      console.error("[GPTServiceOffline] Hourly macro analysis error:", err.message);
+      return { macro_view: "NEUTRAL", macro_comment: "No hourly macro" };
+    });
+    const min15MacroPromise = callOpenAI(min15MacroPrompt).catch((err) => {
+      console.error("[GPTServiceOffline] 15m macro analysis error:", err.message);
+      return { macro_view: "NEUTRAL", macro_comment: "No 15m macro" };
+    });
+    const min5MacroPromise = callOpenAI(min5MacroPrompt).catch((err) => {
+      console.error("[GPTServiceOffline] 5m macro analysis error:", err.message);
+      return { macro_view: "NEUTRAL", macro_comment: "No 5m macro" };
+    });
+    
+    const [hourlyMacro, min15Macro, min5Macro] = await Promise.all([
+      hourlyMacroPromise,
+      min15MacroPromise,
+      min5MacroPromise
+    ]);
+    console.log("[GPTServiceOffline] Macro results - Hourly:", hourlyMacro, "15m:", min15Macro, "5m:", min5Macro);
   
-  let finalSynergy = null;
-  try {
-    finalSynergy = await callOpenAI(synergyPrompt);
-  } catch (err) {
-    console.error('[GPTService] Synergy analysis error:', err.message);
+    // Build final synergy prompt from all previous responses
+    const synergyPrompt = buildFinalSynergyPrompt(
+      symbol,
+      dailyMacro,
+      weeklyMacro,
+      tf15m,
+      tf1h,
+      fromTime,
+      toTime
+    );
+    console.log("[GPTServiceOffline] Built final synergy prompt:", synergyPrompt);
+    
+    let finalSynergy = null;
+    try {
+      finalSynergy = await callOpenAI(synergyPrompt);
+      console.log("[GPTServiceOffline] Final synergy object received:", finalSynergy);
+    } catch (err) {
+      console.error("[GPTServiceOffline] Synergy analysis error:", err.message);
+    }
+    
+    // In case finalSynergy is null or undefined, set a default fallback:
+    if (!finalSynergy) {
+      console.warn("[GPTServiceOffline] finalSynergy is undefined – setting default fallback object");
+      finalSynergy = {
+        final_action: "HOLD",
+        technical_signal_strength: 0,
+        stop_loss: null,
+        target_profit: null,
+        comment: "No valid synergy result obtained"
+      };
+    }
+    
+    console.log(
+      "[GPTServiceOffline] Returning final analysis result:",
+      finalSynergy
+    );
+    
+    return {
+      gptOutput: {
+        final_action: finalSynergy.final_action,
+        technical_signal_strength: finalSynergy.technical_signal_strength,
+        stop_loss: finalSynergy.stop_loss,
+        target_profit: finalSynergy.target_profit,
+        comment: finalSynergy.comment
+      },
+      tf15m,
+      tf1h,
+      tf5m,
+      tfDailyStats: dailyStats,
+      tfWeeklyStats: weeklyStats,
+      hourlyMacro,  // New field
+      min15Macro,   // New field
+      min5Macro     // New field
+    };
   }
   
-  console.log('[GPTService] Final Synergy:', JSON.stringify(finalSynergy));
-  
-  return {
-    gptOutput: {
-      final_action: finalSynergy?.final_action || 'HOLD',
-      technical_signal_strength: finalSynergy?.technical_signal_strength || 0,
-      stop_loss: finalSynergy?.stop_loss || null,
-      target_profit: finalSynergy?.target_profit || null,
-      comment: finalSynergy?.comment || ''
-    },
-    tf15m,
-    tf1h,
-    tfDailyStats: dailyStats,
-    tfWeeklyStats: weeklyStats
+  module.exports = {
+    analyzeSymbolChain,
+    callOpenAI
   };
-}
-
-// Export funkcií
-module.exports = {
-  gptServiceOffline,
-  callOpenAI
-};

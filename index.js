@@ -66,6 +66,7 @@ wss.on('connection', (ws) => {
         const weeklyData = filterInRange(data.ohlcvWeeklyAll, toTime);
         const hourData = filterInRange(data.ohlcv1hAll, toTime);
         const min15Data = filterInRange(data.ohlcv15mAll, toTime);
+        const min5Data = filterInRange(data.ohlcv5mAll, toTime);
         const min1Data = filterInRange(data.ohlcv1mAll, toTime);
 
         // Ak nie je zadaný fromTime, nastavíme ho na prvý timestamp z hodinových dát
@@ -83,6 +84,7 @@ wss.on('connection', (ws) => {
           weeklyData,
           hourData,
           min15Data,
+          min5Data,
           min1Data
         }, ws)
         .catch(err => {

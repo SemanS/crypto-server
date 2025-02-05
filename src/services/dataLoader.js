@@ -37,14 +37,15 @@ async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
 
   console.log(`[DATA LOADER] Loading timeframes for ${symbol} from ${tsToISO(fromTime)} to ${tsToISO(toTime)} with buffer ${tsToISO(fromTimeWithBuffer)}`);
 
-  const [ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv1mAll] = await Promise.all([
+  const [ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv5mAll, ohlcv1mAll] = await Promise.all([
     fetchOHLCVInChunks(exchange, symbol, '1d', fromTimeWithBuffer, toTime, limit),
     fetchOHLCVInChunks(exchange, symbol, '1w', fromTimeWithBuffer, toTime, limit),
     fetchOHLCVInChunks(exchange, symbol, '1h', fromTimeWithBuffer, toTime, limit),
     fetchOHLCVInChunks(exchange, symbol, '15m', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '5m', fromTimeWithBuffer, toTime, limit),
     fetchOHLCVInChunks(exchange, symbol, '1m', fromTimeWithBuffer, toTime, limit)
   ]);
-  return { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv1mAll };
+  return { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv5mAll, ohlcv1mAll };
 }
 
 function find1mClosePriceAtTime(min1Candles, targetTime) {

@@ -32,6 +32,7 @@ router.get('/backTest', async (req, res) => {
     const weeklyData   = filterInRange(data.ohlcvWeeklyAll, toTime);
     const hourData     = filterInRange(data.ohlcv1hAll, toTime);
     const min15Data    = filterInRange(data.ohlcv15mAll, toTime);
+    const min5Data    = filterInRange(data.ohlcv5mAll, toTime);
     const min1Data     = filterInRange(data.ohlcv1mAll, toTime);
     
     // Ak nie je zadaný fromTime alebo toTime, odvodíme ich z načítaných hodinových dát
@@ -66,6 +67,7 @@ router.get('/backTest', async (req, res) => {
       weeklyData, 
       hourData, 
       min15Data, 
+      min5Data, 
       min1Data 
     });
     

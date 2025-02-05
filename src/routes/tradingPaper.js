@@ -415,7 +415,6 @@ router.get('/simulation', async (req, res) => {
       const analysisMode = req.query.analysisMode || 'actual';
       
       let fromTime, toTime;
-      // Ak sú v query zadané dátumy, spracujeme ich
       if (req.query.fromDate) {
         const d = new Date(req.query.fromDate);
         if (!isNaN(d.getTime())) fromTime = d.getTime();
@@ -426,41 +425,34 @@ router.get('/simulation', async (req, res) => {
       }
       
       if (analysisMode === 'actual') {
-        // Live analýza: nastavíme aktuálny čas
         fromTime = Date.now();
         toTime   = Date.now();
         
-        // Vytvoríme inštanciu ccxt klienta, napr. pre Binance
+        const ccxt = require('ccxt');
         const exchange = new ccxt.binance({ enableRateLimit: true });
         
-        // Načítame aktuálny ticker pre dodatočné informácie
         const ticker = await exchange.fetchTicker(symbol);
         
-        // Načítame OHLCV dáta pre rôzne timeframe:
-        const dailyData  = await exchange.fetchOHLCV(symbol, '1d');  // Denné dáta
-        const weeklyData = await exchange.fetchOHLCV(symbol, '1w');  // Týždenné dáta
-        const min15Data  = await exchange.fetchOHLCV(symbol, '15m'); // 15-minútové dáta
-        const hourData   = await exchange.fetchOHLCV(symbol, '1h');  // Hodinové dáta
+        const dailyData  = await exchange.fetchOHLCV(symbol, '1d');
+        const weeklyData = await exchange.fetchOHLCV(symbol, '1w');
+        const min15Data  = await exchange.fetchOHLCV(symbol, '15m');
+        const hourData   = await exchange.fetchOHLCV(symbol, '1h');
+        const min5Data   = await exchange.fetchOHLCV(symbol, '5m');
         
-        // Pracujeme s hodinovými dátami iba do aktuálneho indexu
         const curIndex = hourData.length - 1;
         
-        // Zavoláme analyzačnú reťaz so získanými dátami
         const gptOutput = await analyzeSymbolChain(
           symbol,
-          dailyData.slice(),                   // Denné dáta
-          weeklyData.slice(),                  // Týždenné dáta
-          min15Data.slice(),                   // 15-minútové dáta
-          hourData.slice(0, curIndex + 1),       // Hodinové dáta
+          dailyData.slice(),
+          weeklyData.slice(),
+          min15Data.slice(),
+          hourData.slice(0, curIndex + 1),
+          min5Data.slice(),
           fromTime,
           toTime,
-          null                                 // V tomto príklade neodovzdávame fundamentálne dáta
         );
         
-        console.log("gptOutput" + JSON.stringify(gptOutput))
-
-        // Vraciame nielen výsledok analýzy, ale aj ticker a raw OHLCV dáta
-        return await res.json({
+        return res.json({
           success: true,
           symbol,
           approach,
@@ -468,43 +460,41 @@ router.get('/simulation', async (req, res) => {
           fromTime,
           toTime,
           ticker,
-          finalAction: gptOutput?.gptOutput.final_action || 'HOLD',
-          commentGPT:  gptOutput?.gptOutput.comment || '(no comment)',
-          synergy: {
-            final_action: gptOutput.gptOutput.final_action,
-            technical_signal_strength: gptOutput?.gptOutput.technical_signal_strength || 0,
-            stop_loss: gptOutput?.gptOutput.stop_loss || null,
-            target_profit: gptOutput?.gptOutput.target_profit || null,
-            comment: gptOutput?.gptOutput.comment || ''
-          },
+          finalAction: gptOutput.synergy.final_action,
+          commentGPT: gptOutput.synergy.comment,
+          synergy: gptOutput.synergy,
+          dailyAnalysis: gptOutput.dailyAnalysis,
+          weeklyAnalysis: gptOutput.weeklyAnalysis,
+          hourlyMacro: gptOutput.hourlyMacro,        // New field
+          min15Macro: gptOutput.min15Macro,          // New field
+          min5Macro: gptOutput.min5Macro,            // New field
+          tf15m: gptOutput.tf15m,
+          tf1h: gptOutput.tf1h,
+          tf5m: gptOutput.tf5m,                      // New field
+          indicatorSummary15m: gptOutput.indicatorSummary15m,
+          indicatorSummary1h: gptOutput.indicatorSummary1h,
+          indicatorSummary5m: gptOutput.indicatorSummary5m, // New field
+          dailyStats: gptOutput.dailyStats,
+          weeklyStats: gptOutput.weeklyStats
         });
-        
       } else {
-        // Režim historical – offline dáta
         const {
           ohlcvDailyAll,
           ohlcvWeeklyAll,
           ohlcv15mAll,
-          ohlcv1hAll
+          ohlcv1hAll,
+          ohlcv5mAll
         } = await loadTimeframesForBacktest(symbol, fromTime, toTime);
     
-        // Ak je potrebné, načítame aj fundamentálne dáta
-        let fundamentals = null;
-        if (req.query.includeFundamentals === 'true') {
-          const { getFundamentalsFromNewsAPI } = require('../services/fundamentalsService');
-          fundamentals = await getFundamentalsFromNewsAPI(symbol);
-        }
-    
-        // Zavoláme analyzačnú reťaz s offline dátami
         const analysis = await analyzeSymbolChain(
           symbol,
-          ohlcvDailyAll.slice(),   // Denné dáta
-          ohlcvWeeklyAll.slice(),  // Týždenné dáta
-          ohlcv15mAll.slice(),     // 15-minútové dáta
-          ohlcv1hAll.slice(),      // Hodinové dáta
+          ohlcvDailyAll.slice(),
+          ohlcvWeeklyAll.slice(),
+          ohlcv15mAll.slice(),
+          ohlcv1hAll.slice(),
+          ohlcv5mAll.slice(),
           fromTime,
           toTime,
-          fundamentals
         );
     
         return res.json({
@@ -514,16 +504,28 @@ router.get('/simulation', async (req, res) => {
           analysisMode: 'historical',
           fromTime,
           toTime,
-          finalAction: analysis.gptOutput?.final_action || 'HOLD',
-          commentGPT:  analysis.gptOutput?.comment      || '(no comment)',
-          synergy:     analysis.gptOutput,
+          finalAction: analysis.synergy.final_action,
+          commentGPT: analysis.synergy.comment,
+          synergy: analysis.synergy,
+          dailyAnalysis: analysis.dailyAnalysis,
+          weeklyAnalysis: analysis.weeklyAnalysis,
+          hourlyMacro: analysis.hourlyMacro,
+          min15Macro: analysis.min15Macro,
+          min5Macro: analysis.min5Macro,
+          tf15m: analysis.tf15m,
+          tf1h: analysis.tf1h,
+          tf5m: analysis.tf5m,
+          indicatorSummary15m: analysis.indicatorSummary15m,
+          indicatorSummary1h: analysis.indicatorSummary1h,
+          indicatorSummary5m: analysis.indicatorSummary5m,
+          dailyStats: analysis.dailyStats,
+          weeklyStats: analysis.weeklyStats
         });
       }
     } catch (err) {
-      console.error("Chyba /directAnalysis:", err.message);
+      console.error("Error in /directAnalysis:", err.message);
       return res.status(500).json({ error: err.message });
     }
   });
   
   module.exports = router;
-  
