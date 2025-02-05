@@ -67,8 +67,8 @@ function formatNumber(num) {
 }
 
 function buildDailyPrompt(symbol, dailyStats) {
-  const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
-  return `
+    const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
+    return `
   Daily stats for ${symbol}:
   mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
   
@@ -79,11 +79,11 @@ function buildDailyPrompt(symbol, dailyStats) {
   }
   (No extra text.)
   `;
-}
+  }
 
 function buildWeeklyPrompt(symbol, weeklyStats) {
-  const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = weeklyStats;
-  return `
+    const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = weeklyStats;
+    return `
   Weekly stats for ${symbol}:
   mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
   
@@ -94,76 +94,82 @@ function buildWeeklyPrompt(symbol, weeklyStats) {
   }
   (No extra text.)
   `;
-}
+  }
 
 function buildIndicatorSummary(tfData, timeframe) {
-  if (!tfData) return 'N/A';
-  let summary = `timeframe=${timeframe}, close=${formatNumber(tfData.lastClose)}\n`;
-  if (timeframe === '5m') {
-    if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
-    if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
-    if (tfData.lastBoll) {
-      const lower = tfData.lastBoll.lower !== undefined ? formatNumber(tfData.lastBoll.lower) : 'N/A';
-      const mid = tfData.lastBoll.mid !== undefined ? formatNumber(tfData.lastBoll.mid) : 'N/A';
-      const upper = tfData.lastBoll.upper !== undefined ? formatNumber(tfData.lastBoll.upper) : 'N/A';
-      summary += `Bollinger Bands: lower=${lower}, mid=${mid}, upper=${upper}\n`;
+    if (!tfData) return 'N/A';
+    let summary = `timeframe=${timeframe}, close=${formatNumber(tfData.lastClose)}\n`;
+    
+    if (timeframe === '5m') {
+      // 5-minútový: vhodný pre scalping a rýchle signály
+      if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
+      if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
+      if (tfData.lastBoll) {
+        const lower = tfData.lastBoll.lower !== undefined ? formatNumber(tfData.lastBoll.lower) : 'N/A';
+        const mid   = tfData.lastBoll.mid !== undefined ? formatNumber(tfData.lastBoll.mid) : 'N/A';
+        const upper = tfData.lastBoll.upper !== undefined ? formatNumber(tfData.lastBoll.upper) : 'N/A';
+        summary += `Bollinger Bands: lower=${lower}, mid=${mid}, upper=${upper}\n`;
+      }
+      if (tfData.lastATR !== undefined) summary += `ATR=${formatNumber(tfData.lastATR)}\n`;
+    } else if (timeframe === '15m') {
+      // 15-minútový: pre intradenné obchodovanie / swing trading
+      if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
+      if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
+      if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
+      if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
+      if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
+      if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
+        summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
+      }
+      if (tfData.lastStochastic !== undefined) {
+        summary += `Stochastic: K=${formatNumber(tfData.lastStochastic.k)}, D=${formatNumber(tfData.lastStochastic.d)}\n`;
+      }
+      if (tfData.fibonacci !== undefined) {
+         summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
+      }
+    } else if (timeframe === '1h' || timeframe === '60m') {
+      // 1-hodinový: pre swing trading a kombinovanú analýzu
+      if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
+      if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
+      if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
+      if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
+      if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
+      if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
+        summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
+      }
+      if (tfData.lastVWAP !== undefined) summary += `VWAP=${formatNumber(tfData.lastVWAP)}\n`;
+      if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
+      if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
+      if (tfData.fibonacci !== undefined) summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
+    } else if (timeframe === 'daily') {
+      // Denný: pre strednodobú investičnú analýzu
+      if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
+      if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
+      if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
+      if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
+      if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
+      if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
+      if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
+      if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
+        summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
+      }
+      if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
+      if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
+      if (tfData.trendLines !== undefined) summary += `Trend Lines=${tfData.trendLines}\n`;
+    } else if (timeframe === 'weekly') {
+      // Týždenný: pre dlhodobú analýzu
+      if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
+      if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
+      if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
+      if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
+      if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
+        summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
+      }
+      if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
+      if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
     }
-    if (tfData.lastATR !== undefined) summary += `ATR=${formatNumber(tfData.lastATR)}\n`;
-  } else if (timeframe === '15m') {
-    if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
-    if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
-    if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
-    if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
-    if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
-    if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
-      summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
-    }
-    if (tfData.lastStochastic !== undefined) {
-      summary += `Stochastic: K=${formatNumber(tfData.lastStochastic.k)}, D=${formatNumber(tfData.lastStochastic.d)}\n`;
-    }
-    if (tfData.fibonacci !== undefined) {
-      summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
-    }
-  } else if (timeframe === '1h' || timeframe === '60m') {
-    if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
-    if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
-    if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
-    if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
-    if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
-    if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
-      summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
-    }
-    if (tfData.lastVWAP !== undefined) summary += `VWAP=${formatNumber(tfData.lastVWAP)}\n`;
-    if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
-    if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
-    if (tfData.fibonacci !== undefined) summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
-  } else if (timeframe === 'daily') {
-    if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
-    if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
-    if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
-    if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
-    if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
-    if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
-    if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
-    if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
-      summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
-    }
-    if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
-    if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
-    if (tfData.trendLines !== undefined) summary += `Trend Lines=${tfData.trendLines}\n`;
-  } else if (timeframe === 'weekly') {
-    if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
-    if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
-    if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
-    if (tfData.lastRSI !== undefined) summary += `RSI=${formatNumber(tfData.lastRSI)}\n`;
-    if (tfData.lastMACD && tfData.lastMACD.MACD !== undefined) {
-      summary += `MACD=${formatNumber(tfData.lastMACD.MACD)}, signal=${formatNumber(tfData.lastMACD.signal)}, hist=${formatNumber(tfData.lastMACD.histogram)}\n`;
-    }
-    if (tfData.supportResistance !== undefined) summary += `Support/Resistance=${tfData.supportResistance}\n`;
-    if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
+    return summary;
   }
-  return summary;
-}
 
 function build5mMacroPrompt(symbol, min5Indicators) {
   const summary = buildIndicatorSummary(min5Indicators);

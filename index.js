@@ -43,7 +43,7 @@ wss.on('connection', (ws) => {
       const msg = JSON.parse(message);
       if (msg.type === 'startBacktest') {
 
-        const { symbol, fromDate, toDate } = msg;
+        const { symbol, hoursToBacktest, fromDate, toDate } = msg;
         
         let fromTime = (fromDate && fromDate.trim() !== '')
           ? new Date(fromDate).getTime()
