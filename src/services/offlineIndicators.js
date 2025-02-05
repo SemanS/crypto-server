@@ -11,7 +11,7 @@ const {
     if (!dailyOhlcvSlice || dailyOhlcvSlice.length < 2) {
       throw new Error('Not enough daily data offline');
     }
-    // dailyOhlcvSlice = [ [ts, open, high, low, close, volume], ... ]
+    // dailyOhlcvSlice: [ [ts, open, high, low, close, volume], ... ]
     const closes = dailyOhlcvSlice.map(c => c[4]);
     const returns = [];
     for (let i = 1; i < closes.length; i++) {
@@ -24,14 +24,12 @@ const {
     const maxVal  = Math.max(...returns);
     const skewVal = skewness(returns, meanVal, stdevVal);
     const kurtVal = kurtosis(returns, meanVal, stdevVal);
-  
+    
     return { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal };
   }
   
   // (B) offlineWeeklyStats – analogické pre weekly
   function offlineWeeklyStats(weeklyOhlcvSlice) {
-    // weeklyOhlcvSlice sa očakáva v rovnakom tvare [ [ts, open, high, low, close, volume], ... ]
-    // Minimálne 2 týždne, inak nevieme logicky vypočítať returns
     if (!weeklyOhlcvSlice || weeklyOhlcvSlice.length < 2) {
       throw new Error("Not enough weekly data offline");
     }
@@ -47,7 +45,7 @@ const {
     const maxVal  = Math.max(...returns);
     const skewVal = skewness(returns, meanVal, stdevVal);
     const kurtVal = kurtosis(returns, meanVal, stdevVal);
-  
+    
     return { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal };
   }
   
@@ -57,10 +55,8 @@ const {
       throw new Error(`No data for timeframe=${timeframeLabel}`);
     }
     
-    // If ohlcvSlice is not an array, try converting it using Object.values
     if (!Array.isArray(ohlcvSlice)) {
       if (typeof ohlcvSlice === 'object' && ohlcvSlice !== null) {
-        // Log the original value to help with debugging
         console.warn(`ohlcvSlice for timeframe=${timeframeLabel} is not an array. Attempting to convert using Object.values.`);
         ohlcvSlice = Object.values(ohlcvSlice);
       } else {
@@ -72,13 +68,13 @@ const {
       throw new Error(`No data for timeframe=${timeframeLabel}`);
     }
     
-    // Map OHLCV values (expecting each entry is an array: [ts, open, high, low, close, volume])
+    // Predpoklad: každá položka má tvar [ts, open, high, low, close, volume]
     const highs   = ohlcvSlice.map(c => c[2]);
     const lows    = ohlcvSlice.map(c => c[3]);
     const closes  = ohlcvSlice.map(c => c[4]);
     const volumes = ohlcvSlice.map(c => c[5]);
   
-    // Calculate indicators
+    // Výpočet indikátorov
     const rsiData = RSI.calculate({ values: closes, period: 14 });
     const lastRSI = safeLast(rsiData);
   
@@ -128,6 +124,8 @@ const {
       lastATR,
       lastMFI,
       lastOBV
+      // Tu môžeš pridať ďalšie vlastnosti:
+      // lastVWAP, pivotPoints, fibonacci, openingRange, psychLevels, atď.
     };
   }
   
@@ -152,7 +150,7 @@ const {
     const n = arr.length;
     const sum4 = arr.reduce((acc, v) => acc + Math.pow(v - mean, 4), 0);
     return ((n * (n+1))/((n-1)*(n-2)*(n-3))) * (sum4 / Math.pow(std,4))
-           - (3 * (n-1)*(n-1))/((n-2)*(n-3));
+             - (3 * (n-1)*(n-1))/((n-2)*(n-3));
   }
   
   module.exports = {
