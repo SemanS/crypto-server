@@ -1,77 +1,107 @@
+const ccxt = require('ccxt');
+const { tsToISO, timeframeToMs } = require('../utils/timeUtils');
+
+async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, limit = 1000) {
+  let allOhlcv = [];
+  let since = fromTS;
+  const finalTS = toTS || Date.now();
+  while (true) {
+    const batch = await exchange.fetchOHLCV(symbol, timeframe, since, limit);
+    if (!batch || batch.length === 0) {
+      break;
+    }
+    allOhlcv = allOhlcv.concat(batch);
+    const lastTS = batch[batch.length - 1][0];
+    if (lastTS >= finalTS) break;
+    if (batch.length < limit) break;
+    since = lastTS + timeframeToMs(timeframe);
+    if (since > finalTS) break;
+  }
+  const filtered = allOhlcv.filter(c => c[0] <= finalTS);
+  return filtered;
+}
+
+async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
+  const exchange = new ccxt.binance({ enableRateLimit: true });
+  const limit = 1000;
+  const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
+  const fromTimeWithBuffer = fromTime ? Math.max(0, fromTime - SIXTY_DAYS_MS) : 0;
+  const [ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv5mAll, ohlcv1mAll] = await Promise.all([
+    fetchOHLCVInChunks(exchange, symbol, '1d', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '1w', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '1h', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '15m', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '5m', fromTimeWithBuffer, toTime, limit),
+    fetchOHLCVInChunks(exchange, symbol, '1m', fromTimeWithBuffer, toTime, limit)
+  ]);
+  return { ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv5mAll, ohlcv1mAll };
+}
+
+function find1mClosePriceAtTime(min1Candles, targetTime) {
+  const oneMinuteMs = timeframeToMs('1m');
+  for (let i = 0; i < min1Candles.length; i++) {
+    const start = min1Candles[i][0];
+    const end = start + oneMinuteMs;
+    if (start <= targetTime && targetTime < end) {
+      return min1Candles[i][4];
+    }
+  }
+  return null;
+}
+
+module.exports = { fetchOHLCVInChunks, loadTimeframesForBacktest, find1mClosePriceAtTime };
+
+
+/* gptServiceOffline.js */
 const OpenAI = require('openai');
-// formatTS slúži na formátovanie timestampov pre prompt
 const { formatTS } = require('../utils/timeUtils');
-// offlineDailyStats, offlineWeeklyStats a offlineIndicatorsForTimeframe slúžia na získanie súhrnných štatistík a indikátorov z dát
 const { offlineDailyStats, offlineWeeklyStats, offlineIndicatorsForTimeframe } = require('./offlineIndicators');
 
-// Inicializujeme klienta OpenAI s nastavením z .env
 const openAiClient = new OpenAI({
   organization: process.env.OPENAI_ORGANIZATION,
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Pomocná funkcia formatNumber – formátuje číslo na 4 desatinné miesta
 function formatNumber(num) {
   return Number(num.toFixed(4));
 }
 
-/*
-  Funkcia buildDailyPrompt:
-  - Vytvára prompt pre OpenAI na analyzovanie denných štatistík.
-  - Prompt obsahuje hodnoty (mean, stdev, min, max, skew, kurt) a žiadosť, aby AI vrátila "macro_view":
-    "BULLISH", "BEARISH" alebo "NEUTRAL", spolu s krátkym komentárom.
-  - Komentáre vám pomôžu skontrolovať, či predpoveď vychádza z reálnych štatistík.
-*/
 function buildDailyPrompt(symbol, dailyStats) {
     const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = dailyStats;
     return `
   Daily stats for ${symbol}:
   mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
-  
-  Based on these daily statistics, please provide a "macro_view" for ${symbol}:
-  - If you believe the market is trending upward, respond with "BULLISH".
-  - If you believe the market is trending downward, respond with "BEARISH".
-  - Otherwise, respond with "NEUTRAL".
-  Also, provide a short comment explaining key factors.
-  Return JSON exactly in this format:
+  - technical_signal_strength should be number from 0 to 100.
+
+  Please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
   {
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
     "macro_view": "...",
     "macro_comment": "..."
   }
   (No extra text.)
   `;
-}
+  }
 
-/*
-  Funkcia buildWeeklyPrompt:
-  - Podobne ako buildDailyPrompt, ale pracuje so týždennými štatistikami.
-  - Vráti predpoveď, či je týždenný pohľad bullish, bearish alebo neutral.
-*/
 function buildWeeklyPrompt(symbol, weeklyStats) {
     const { meanVal, stdevVal, minVal, maxVal, skewVal, kurtVal } = weeklyStats;
     return `
   Weekly stats for ${symbol}:
   mean=${formatNumber(meanVal)}, stdev=${formatNumber(stdevVal)}, min=${formatNumber(minVal)}, max=${formatNumber(maxVal)}, skew=${formatNumber(skewVal)}, kurt=${formatNumber(kurtVal)}
-  
-  Based on these weekly statistics, please provide a "weekly_view" for ${symbol}:
-  - Respond with "BULLISH" if you expect upward momentum,
-  - "BEARISH" for downward motion, or "NEUTRAL" otherwise.
-  Also provide a short comment with your reasoning.
-  Return JSON exactly in this format:
+  - technical_signal_strength should be number from 0 to 100.
+
+  Please provide a "weekly_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
   {
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
     "weekly_view": "...",
     "weekly_comment": "..."
   }
   (No extra text.)
   `;
-}
+  }
 
-/*
-  Funkcia buildIndicatorSummary:
-  - Zostaví textový súhrn indikátorov pre daný timeframe.
-  - Pre každý časový rámec (napr. 5m, 15m, 1h, denné, týždenné) vypíše relevantné indikátory.
-  - Tento text sa potom vloží do promptu, aby ste si mohli overiť, či predpoveď AI (bullish, bearish) koreluje s indikátormi.
-*/
 function buildIndicatorSummary(tfData, timeframe) {
     if (!tfData) return 'N/A';
     let summary = `timeframe=${timeframe}, close=${formatNumber(tfData.lastClose)}\n`;
@@ -88,7 +118,7 @@ function buildIndicatorSummary(tfData, timeframe) {
       }
       if (tfData.lastATR !== undefined) summary += `ATR=${formatNumber(tfData.lastATR)}\n`;
     } else if (timeframe === '15m') {
-      // 15-minútový
+      // 15-minútový: pre intradenné obchodovanie / swing trading
       if (tfData.lastEMA9 !== undefined) summary += `EMA9=${formatNumber(tfData.lastEMA9)}\n`;
       if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
       if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
@@ -104,7 +134,7 @@ function buildIndicatorSummary(tfData, timeframe) {
          summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
       }
     } else if (timeframe === '1h' || timeframe === '60m') {
-      // 1-hodinový: pre swing trading
+      // 1-hodinový: pre swing trading a kombinovanú analýzu
       if (tfData.lastEMA21 !== undefined) summary += `EMA21=${formatNumber(tfData.lastEMA21)}\n`;
       if (tfData.lastEMA50 !== undefined) summary += `EMA50=${formatNumber(tfData.lastEMA50)}\n`;
       if (tfData.lastEMA200 !== undefined) summary += `EMA200=${formatNumber(tfData.lastEMA200)}\n`;
@@ -118,7 +148,7 @@ function buildIndicatorSummary(tfData, timeframe) {
       if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
       if (tfData.fibonacci !== undefined) summary += `Fibonacci retracement=${formatNumber(tfData.fibonacci)}\n`;
     } else if (timeframe === 'daily') {
-      // Denný
+      // Denný: pre strednodobú investičnú analýzu
       if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
       if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
       if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
@@ -133,7 +163,7 @@ function buildIndicatorSummary(tfData, timeframe) {
       if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
       if (tfData.trendLines !== undefined) summary += `Trend Lines=${tfData.trendLines}\n`;
     } else if (timeframe === 'weekly') {
-      // Týždenný
+      // Týždenný: pre dlhodobú analýzu
       if (tfData.lastSMA50 !== undefined) summary += `SMA50=${formatNumber(tfData.lastSMA50)}\n`;
       if (tfData.lastSMA100 !== undefined) summary += `SMA100=${formatNumber(tfData.lastSMA100)}\n`;
       if (tfData.lastSMA200 !== undefined) summary += `SMA200=${formatNumber(tfData.lastSMA200)}\n`;
@@ -145,31 +175,27 @@ function buildIndicatorSummary(tfData, timeframe) {
       if (tfData.pivotPoints !== undefined) summary += `Pivot Points=${tfData.pivotPoints}\n`;
     }
     return summary;
-}
-  
-/*
-  Funkcia build5mMacroPrompt:
-  - Vytvára prompt na analýzu 5-minútových indikátorov.
-  - Výstup (macro_view a macro_comment) má pomôcť určiť, či sú signály bullish alebo bearish.
-  - Komentáre v prompt-e vám umožnia skontrolovať, či sú indikátory interpretované správne.
-*/
+  }
+
 function build5mMacroPrompt(symbol, min5Indicators) {
-  const summary = buildIndicatorSummary(min5Indicators, "5m");
+  const summary = buildIndicatorSummary(min5Indicators);
   return `
 5-minute summary (Scalping, high volatility) for ${symbol}:
 Indicators considered:
-- EMA9 and EMA21: Used for detecting rapid trend direction changes.
-- VWAP: Average price weighted by volume.
-- RSI (7 or 14): Overbought if above 70, oversold if below 30.
-- Bollinger Bands (20,2): Identify price breakouts and volatility squeezes.
-- MACD (12,26,9): Crossover signals for momentum shifts.
-Strategy: Check for Bollinger Band breakouts confirmed by VWAP and a MACD crossover.
+- EMA9 and EMA21: Short-term moving averages to quickly identify trend direction.
+- VWAP: Volume Weighted Average Price to determine average price based on volume.
+- RSI (7 or 14): To identify overbought (above 70) or oversold (below 30) conditions.
+- Bollinger Bands (20,2): To detect breakouts and volatility squeezes.
+- MACD (12,26,9): Crossovers can indicate short-term momentum shifts.
+Strategy: Look for breakouts through Bollinger Bands and confirm entry with VWAP and a MACD crossover.
 Computed indicators summary:
 ${summary}
+- technical_signal_strength should be number from 0 to 100.
 
-Based on the above, provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a brief reason.
-Return JSON:
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
 {
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
   "macro_view": "...",
   "macro_comment": "..."
 }
@@ -177,29 +203,25 @@ Return JSON:
 `;
 }
 
-/*
-  Funkcia build15mMacroPrompt:
-  - Vytvára prompt pre 15-minútové indikátory.
-  - Vracia predpoveď o intradennom (swing) trende – bullish, bearish alebo neutral.
-  - Komentár macro_comment by mal objasniť, prečo podľa indikátorov očakávame daný trend.
-*/
 function build15mMacroPrompt(symbol, min15Indicators) {
-  const summary = buildIndicatorSummary(min15Indicators, "15m");
+  const summary = buildIndicatorSummary(min15Indicators);
   return `
 15-minute summary (Intraday Trading, Swing) for ${symbol}:
 Indicators considered:
-- EMA20 and EMA50: Identify short-term and medium-term trends.
-- Fibonacci retracement levels: Used to find potential support/resistance.
-- RSI (14) and Stochastic RSI: Indicate overbought or oversold conditions.
-- OBV: Accumulation/distribution based on volume.
-- ATR: Measures market volatility.
-Strategy: Use Fibonacci retracement to identify correction levels and confirm trend with EMA and RSI divergences.
+- EMA20 and EMA50: Identify short-term and mid-term trends.
+- Fibonacci retracement levels (e.g., 0.618): To find potential entry correction levels.
+- RSI (14) and Stochastic RSI (3,3,14,14): To detect extreme conditions and momentum shifts.
+- OBV: For accumulation/distribution of volume.
+- ATR: To measure market volatility.
+Strategy: Use Fibonacci retracement for corrections and confirm the trend with EMA and RSI divergence.
 Computed indicators summary:
 ${summary}
+- technical_signal_strength should be number from 0 to 100.
 
-Based on the above, provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a brief reason.
-Return JSON:
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
 {
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
   "macro_view": "...",
   "macro_comment": "..."
 }
@@ -207,29 +229,25 @@ Return JSON:
 `;
 }
 
-/*
-  Funkcia buildHourlyMacroPrompt:
-  - Vytvára prompt pre hodinové indikátory.
-  - Pomáha určiť dlhodobý trend a momentum.
-  - Macro_view a macro_comment by mali jasne uviesť, či je trh bullish, bearish alebo neutral.
-*/
 function buildHourlyMacroPrompt(symbol, hourlyIndicators) {
-  const summary = buildIndicatorSummary(hourlyIndicators, "1h");
+  const summary = buildIndicatorSummary(hourlyIndicators);
   return `
 Hourly summary (Swing Trading, Momentum) for ${symbol}:
 Indicators considered:
-- EMA50 and EMA200: Long-term trend identification.
-- Ichimoku Cloud: Provides support and resistance levels and overall market sentiment.
-- RSI (14): To detect potential reversals.
-- Volume Profile (VPVR): Identifies key liquidity zones.
-- MACD (12,26,9): Looks for momentum shifts.
-Strategy: Wait for EMA crossover confirmation, then consider entries after retesting key support/resistance zones.
+- EMA50 and EMA200: To identify the long-term trend.
+- Ichimoku Cloud: For support, resistance, and overall market sentiment.
+- RSI (14) with divergence analysis: To spot potential trend reversals.
+- Volume Profile (VPVR): To reveal key liquidity zones and points of control (POC).
+- MACD (12,26,9) and Histogram: For momentum and confirmation of crossovers.
+Strategy: Wait for trend confirmation via an EMA crossover, then enter after retesting key VPVR levels.
 Computed indicators summary:
 ${summary}
+- technical_signal_strength should be number from 0 to 100.
 
-Based on the above, provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a brief reason.
-Return JSON:
+Based on the above, please provide a "macro_view" ("BULLISH", "BEARISH", or "NEUTRAL") and a short reason. Return JSON:
 {
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
   "macro_view": "...",
   "macro_comment": "..."
 }
@@ -237,18 +255,12 @@ Return JSON:
 `;
 }
 
-/*
-  Funkcia buildFinalSynergyPrompt:
-  - Kombinuje výsledky denných, týždenných a rôznych časových rámcov (15m, 5m, 1h) do finálneho promptu.
-  - Cieľom je vytvoriť synergický pohľad, ktorý slúži ako konečné odporúčanie.
-  - Do promptu sú zahrnuté aj komentáre od jednotlivých analýz, aby ste si mohli overiť, či celkový obraz vychádza bullish, bearish alebo neutral.
-*/
 function buildFinalSynergyPrompt(symbol, dailyMacro, weeklyMacro, tf15m, tf5m, tf1h, fromTime, toTime) {
   const dailySummary = `macro_view=${dailyMacro.macro_view}, reason=${dailyMacro.macro_comment}`;
   const weeklySummary = `weekly_view=${weeklyMacro.weekly_view}, reason=${weeklyMacro.weekly_comment}`;
-  const sum15m = buildIndicatorSummary(tf15m, "15m");
-  const sum5m = buildIndicatorSummary(tf5m, "5m");
-  const sum1h = buildIndicatorSummary(tf1h, "1h");
+  const sum15m = buildIndicatorSummary(tf15m);
+  const sum5m = buildIndicatorSummary(tf5m);
+  const sum1h = buildIndicatorSummary(tf1h);
   let dateRangeText = '';
   if (fromTime || toTime) {
     const fromTxt = fromTime ? formatTS(fromTime) : 'N/A';
@@ -258,34 +270,33 @@ function buildFinalSynergyPrompt(symbol, dailyMacro, weeklyMacro, tf15m, tf5m, t
   return `
 We have the following analyses for ${symbol}:
 
-Daily Analysis:
-${dailySummary}
 
-Weekly Analysis:
-${weeklySummary}
+Daily Macro: ${dailySummary}
+Weekly Macro: ${weeklySummary}
 
 Short-term Analysis:
-15m timeframe indicators:
+15m timeframe:
 ${sum15m}
-5m timeframe indicators:
+5m timeframe:
 ${sum5m}
-1h timeframe indicators:
+1h timeframe:
 ${sum1h}
 
 ${dateRangeText}
 
 Dynamic Weighting Instructions:
-- Base weights: Short-term 5m = 50%, 15m = 25%, 1h = 25%.
-- Adjust weights based on market volatility (if ATR is high, increase weight of short-term signals).
-- Factor in momenta from indicators (EMA crossovers, MACD, etc.) and volume.
+- Base weights (initially): Short-term 5m = 50%, 15m = 25%, 1h = 25%.
+- Adjust weights based on market volatility (for example, if ATR is high, weight short-term signals higher).
+- Factor in momentum from advanced indicators (EMA crossovers, MACD, etc.) and volume data.
 
 Risk Management:
-- Determine stop_loss and target_profit levels based on ATR and Bollinger Bands.
-
-Combine the above and return JSON in the following format (no extra text):
+- Assess current price in relation to ATR and Bollinger Bands.
+- Suggest stop_loss and target_profit levels accordingly.
+- technical_signal_strength should be number from 0 to 100.
+Combine all the above into one final conclusion. Return JSON in the following format (no extra text):
 {
-  "technical_signal_strength": <number>, 
-  "final_action": "BUY" | "SELL" | "HOLD",
+  "technical_signal_strength": <number>,
+  "final_action": "BUY"|"SELL"|"HOLD",
   "stop_loss": <number>,
   "target_profit": <number>,
   "comment": "short comment"
@@ -293,22 +304,15 @@ Combine the above and return JSON in the following format (no extra text):
 `;
 }
 
-/*
-  Funkcia callOpenAI – volá OpenAI API s daným promptom a vracia JSON odpoveď.
-  Výpisy logov tu vám pomôžu skontrolovať, či API odpovedá očakávaným formátom.
-*/
 async function callOpenAI(prompt) {
   try {
-    console.log("[GPTServiceOffline] Volám OpenAI s promptom:\n", prompt);
     const response = await openAiClient.chat.completions.create({
       model: "o3-mini",
       messages: [{ role: "user", content: prompt }]
     });
     let raw = response.choices[0]?.message?.content || "";
     raw = raw.replace(/```(\w+)?/g, "").trim();
-    console.log("[GPTServiceOffline] Raw odpoveď od OpenAI:", raw);
     const parsed = JSON.parse(raw);
-    console.log("[GPTServiceOffline] Parsed odpoveď:", parsed);
     return parsed;
   } catch (err) {
     console.warn("[GPTServiceOffline] Error calling OpenAI:", err.message);
@@ -316,13 +320,6 @@ async function callOpenAI(prompt) {
   }
 }
 
-/*
-  Funkcia analyzeSymbolChain:
-  - Zostavuje analýzu pre daný symbol pomocou offline štatistík a indikátorov pre rôzne časové rámce.
-  - Vytvára prompt-y pre dennú a týždennú analýzu, potom pre krátkodobé indikátory.
-  - Nakoniec kombinuje tieto výsledky do finálneho synergického promptu, ktorý sa posiela OpenAI.
-  - Výstup obsahuje hodnotenia (macro_view, weekly_view, final_action, atď.) a komentáre, ktoré vám umožnia skontrolovať, či je predpoveď "BULLISH", "BEARISH" alebo "NEUTRAL".
-*/
 async function analyzeSymbolChain(
   symbol,
   dailyDataSlice,
@@ -333,24 +330,19 @@ async function analyzeSymbolChain(
   fromTime,
   toTime
 ) {
-  // Získame denné a týždenné štatistiky
-  const dailyStats = offlineDailyStats(dailyDataSlice);
-  const weeklyStats = offlineWeeklyStats(weeklyDataSlice);
-  
-  // Vytvoríme prompt pre dennú analýzu a získame odpoveď
-  const dailyPrompt = buildDailyPrompt(symbol, dailyStats);
-  const weeklyPrompt = buildWeeklyPrompt(symbol, weeklyStats);
-  
-  const dailyPromise = callOpenAI(dailyPrompt).catch((err) => {
+  const dailyStats = await offlineDailyStats(dailyDataSlice);
+  const weeklyStats = await offlineWeeklyStats(weeklyDataSlice);
+  const dailyPrompt = await buildDailyPrompt(symbol, dailyStats);
+  const weeklyPrompt = await buildWeeklyPrompt(symbol, weeklyStats);
+  const dailyPromise = await callOpenAI(dailyPrompt).catch((err) => {
     console.error("[GPTServiceOffline] Daily analysis error:", err.message);
     return { macro_view: "NEUTRAL", macro_comment: "No macro" };
   });
-  const weeklyPromise = callOpenAI(weeklyPrompt).catch((err) => {
+  console.log("dailyPromise" + JSON.stringify(dailyPromise))
+  const weeklyPromise = await callOpenAI(weeklyPrompt).catch((err) => {
     console.error("[GPTServiceOffline] Weekly analysis error:", err.message);
     return { weekly_view: "NEUTRAL", weekly_comment: "No weekly" };
   });
-  
-  // Získame indikátory pre 15m, 1h a 5m timeframe
   const [tf15m, tf1h, tf5m] = await Promise.all([
     Promise.resolve(offlineIndicatorsForTimeframe(min15DataSlice, "15m")).catch((err) => {
       console.warn("[GPTServiceOffline] 15m indicator error:", err.message);
@@ -365,42 +357,35 @@ async function analyzeSymbolChain(
       return null;
     })
   ]);
-  
   const [dailyResult, weeklyResult] = await Promise.all([dailyPromise, weeklyPromise]);
-  const dailyMacro = dailyResult || {
+  const dailyMacro = await dailyResult || {
     macro_view: "NEUTRAL",
     macro_comment: "No macro"
   };
-  const weeklyMacro = weeklyResult || {
+  const weeklyMacro = await weeklyResult || {
     weekly_view: "NEUTRAL",
     weekly_comment: "No weekly"
   };
-  
-  // Vytvoríme prompt-y pre hodinovú, 15m a 5m analýzu – tieto pomôžu upresniť krátkodobý pohľad
   const hourlyMacroPrompt = buildHourlyMacroPrompt(symbol, tf1h);
   const min15MacroPrompt = build15mMacroPrompt(symbol, tf15m);
   const min5MacroPrompt = build5mMacroPrompt(symbol, tf5m);
-  
-  const hourlyMacroPromise = callOpenAI(hourlyMacroPrompt).catch((err) => {
+  const hourlyMacroPromise = await callOpenAI(hourlyMacroPrompt).catch((err) => {
     console.error("[GPTServiceOffline] Hourly macro analysis error:", err.message);
     return { macro_view: "NEUTRAL", macro_comment: "No hourly macro" };
   });
-  const min15MacroPromise = callOpenAI(min15MacroPrompt).catch((err) => {
+  const min15MacroPromise = await callOpenAI(min15MacroPrompt).catch((err) => {
     console.error("[GPTServiceOffline] 15m macro analysis error:", err.message);
     return { macro_view: "NEUTRAL", macro_comment: "No 15m macro" };
   });
-  const min5MacroPromise = callOpenAI(min5MacroPrompt).catch((err) => {
+  const min5MacroPromise = await callOpenAI(min5MacroPrompt).catch((err) => {
     console.error("[GPTServiceOffline] 5m macro analysis error:", err.message);
     return { macro_view: "NEUTRAL", macro_comment: "No 5m macro" };
   });
-  
   const [hourlyMacro, min15Macro, min5Macro] = await Promise.all([
     hourlyMacroPromise,
     min15MacroPromise,
     min5MacroPromise
   ]);
-  
-  // Finálny synergický prompt, ktorý kombinuje denné, týždenné a krátkodobé analýzy
   const synergyPrompt = buildFinalSynergyPrompt(
     symbol,
     dailyMacro,
@@ -411,7 +396,6 @@ async function analyzeSymbolChain(
     fromTime,
     toTime
   );
-  
   let finalSynergy = null;
   try {
     finalSynergy = await callOpenAI(synergyPrompt);
@@ -428,25 +412,52 @@ async function analyzeSymbolChain(
       comment: "No valid synergy result obtained"
     };
   }
-  
-  // Vrátime objekt s výsledkami. Kampane "macro" komentáre vám pomôžu skontrolovať, či
-  // API predpovedá BULLISH, BEARISH alebo NEUTRAL na základe poskytnutých indikátorov.
   return {
-    gptOutput: {
+    gptSynergyOutput: {
       final_action: finalSynergy.final_action,
       technical_signal_strength: finalSynergy.technical_signal_strength,
       stop_loss: finalSynergy.stop_loss,
       target_profit: finalSynergy.target_profit,
       comment: finalSynergy.comment
     },
+    // Pripíšeme nové polia pre každý makro výstup – ak zadanej odpovede OpenAI neobsahujú tieto, nastavíme predvolené hodnoty.
+    gptOutputDaily: {
+      final_action: dailyMacro.final_action || "-",
+      technical_signal_strength: dailyMacro.technical_signal_strength || 0,
+      macro_comment: dailyMacro.macro_comment || "-",
+      macro_view: dailyMacro.macro_view || "-",
+    },
+    gptOutputWeekly: {
+      final_action: weeklyMacro.final_action || "-",
+      technical_signal_strength: weeklyMacro.technical_signal_strength || 0,
+      weekly_comment: weeklyMacro.weekly_comment || "-",
+      macro_view: weeklyMacro.macro_view || "-",
+    },
+    gptOutput15m: {
+      final_action: min15Macro.final_action || "-",
+      technical_signal_strength: min15Macro.technical_signal_strength || 0,
+      macro_comment: min15Macro.macro_comment || "-",
+      macro_view: min15Macro.macro_view || "-",
+
+    },
+    gptOutput5m: {
+      final_action: min5Macro.final_action || "-",
+      technical_signal_strength: min5Macro.technical_signal_strength || 0,
+      macro_comment: min5Macro.macro_comment || "-",
+      macro_view: min5Macro.macro_view || "-",
+
+    },
+    gptOutput1h: {
+      final_action: hourlyMacro.final_action || "-",
+      technical_signal_strength: hourlyMacro.technical_signal_strength || 0,
+      macro_comment: hourlyMacro.macro_comment || "-",
+      macro_view: hourlyMacro.macro_view || "-",
+    },
     tf15m,
     tf1h,
     tf5m,
     tfDailyStats: dailyStats,
-    tfWeeklyStats: weeklyStats,
-    hourlyMacro,
-    min15Macro,
-    min5Macro
+    tfWeeklyStats: weeklyStats
   };
 }
 
