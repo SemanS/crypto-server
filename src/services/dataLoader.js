@@ -60,4 +60,29 @@ function find1mClosePriceAtTime(min1Candles, targetTime) {
   return null;
 }
 
-module.exports = { fetchOHLCVInChunks, loadTimeframesForBacktest, find1mClosePriceAtTime };
+function find1mClosePriceAtTime(min1Candles, targetTime) {
+  const oneMinuteMs = timeframeToMs('1m');
+  for (let i = 0; i < min1Candles.length; i++) {
+    const start = min1Candles[i][0];
+    const end = start + oneMinuteMs;
+    if (start <= targetTime && targetTime < end) {
+      return min1Candles[i][4]; // Uzatváracia (close) cena
+    }
+  }
+  return null;
+}
+
+// NOVÁ FUNKCIA: vráti otvorenie (open) ceny pre candle, ktorý pokrýva targetTime
+function find1mOpenPriceAtTime(min1Candles, targetTime) {
+  const oneMinuteMs = timeframeToMs('1m');
+  for (let i = 0; i < min1Candles.length; i++) {
+    const start = min1Candles[i][0];
+    const end = start + oneMinuteMs;
+    if (start <= targetTime && targetTime < end) {
+      return min1Candles[i][1]; // Otváracia (open) cena
+    }
+  }
+  return null;
+}
+
+module.exports = { fetchOHLCVInChunks, loadTimeframesForBacktest, find1mClosePriceAtTime, find1mOpenPriceAtTime };
