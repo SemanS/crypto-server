@@ -19,6 +19,7 @@ function aggregateCandlePairs(candle1, candle2) {
 
 /**
  * Výpočet PnL v percentách.
+ * Vracia hodnotu v percentách, napr. 0.03 znamená 0.03%.
  */
 function computePnL(direction, openPrice, closePrice) {
   if (direction === 'BUY') {
@@ -36,6 +37,9 @@ function computePnL(direction, openPrice, closePrice) {
      1‑minútovej sviečky daného intervalu.
    • Exit sa vyhodnocuje cez iteráciu 1‑minútových sviečok v rámci intervalu [decisionTime, decisionTime + interval).
    • Výsledná update správa obsahuje openPrice príslušného intervalu.
+   • Running PnL sa aktualizuje len vtedy, keď dosiahneme minimálny profit či loss threshold:
+        – Pre BUY: len ak trade PnL >= 0.04 %, započítame 0.04 %
+        – Pre loss (alebo SELL analogicky): len ak trade PnL <= -0.8 %, započítame -0.8 %
 */
 async function runBacktest({
     symbol,
@@ -52,8 +56,9 @@ async function runBacktest({
     decisionTF = '15m'
   }, ws) {
     let runningPnL = 0;
-    const profitTargetPercent = 0.04;
-    const lossTargetPercent = 0.08;
+    // Nastavené hodnoty – teraz lossTargetPercent je 0.8 (t.j. 0.8 %)
+    const profitTargetPercent = 0.4;
+    const lossTargetPercent = 0.8;
     const decisionIntervalMs = timeframeToMs(decisionTF);
   
     // Vyberáme dátovú sadu podľa decisionTF
@@ -138,9 +143,9 @@ async function runBacktest({
             technical_signal_strength: analysis.gptOutput.technical_signal_strength || 0
           };
         } else {
-          console.log(`[BacktestEngine] Otváram obchod na ${tsToISO(openTime)} s openPrice ${openPrice}`);
+          console.log(`[BacktestEngine] Otváram obchod na ${tsToISO(openTime)} so openPrice ${openPrice}`);
   
-          // Definujeme interval, počas ktorého budeme vyhodnocovať exit signál
+          // Definujeme interval, počas ktorého budeme vyhodnocovať exit signál: [decisionTime, decisionTime + decisionIntervalMs)
           const intervalStart = decisionTime;
           const intervalEnd = decisionTime + decisionIntervalMs;
           const oneMinCandles = min1Data
@@ -148,7 +153,10 @@ async function runBacktest({
             .sort((a, b) => a[0] - b[0]);
           console.log(`[BacktestEngine] Interval ${tsToISO(intervalStart)} - ${tsToISO(intervalEnd)}: Našiel som ${oneMinCandles.length} 1m sviečok.`);
   
-          // Vyhodnotíme exit v rámci intervalu
+          // Vyhodnotíme exit v rámci intervalu – použijeme upravené podmienky:
+          // Pri BUY trade: ak maximum ceny (candle[2]) dosiahne openPrice * (1 + profitTargetPercent/100)
+          // alebo ak minimum (candle[3]) klesne pod openPrice*(1 - lossTargetPercent/100)
+          // alebo ak computePnL v percentách prekročí threshold (profitTargetPercent alebo -lossTargetPercent)
           let tradeClosed = false;
           let triggerCandle = null;
           for (let candle of oneMinCandles) {
@@ -156,10 +164,10 @@ async function runBacktest({
             console.log(`[BacktestEngine] 1m sviečka ${tsToISO(candle[0])}: cena=${candle[4]}, PnL=${currentPnL.toFixed(2)}%`);
             if (finalAction === 'BUY') {
               if (
-                candle[2] >= openPrice * (1 + profitTargetPercent) ||
-                candle[3] <= openPrice * (1 - lossTargetPercent) ||
-                currentPnL >= profitTargetPercent * 100 ||
-                currentPnL <= -lossTargetPercent * 100
+                candle[2] >= openPrice * (1 + profitTargetPercent/100) ||
+                candle[3] <= openPrice * (1 - lossTargetPercent/100) ||
+                currentPnL >= profitTargetPercent ||
+                currentPnL <= -lossTargetPercent
               ) {
                 tradeClosed = true;
                 triggerCandle = candle;
@@ -168,10 +176,10 @@ async function runBacktest({
               }
             } else if (finalAction === 'SELL') {
               if (
-                candle[3] <= openPrice * (1 - profitTargetPercent) ||
-                candle[2] >= openPrice * (1 + lossTargetPercent) ||
-                currentPnL >= profitTargetPercent * 100 ||
-                currentPnL <= -lossTargetPercent * 100
+                candle[3] <= openPrice * (1 - profitTargetPercent/100) ||
+                candle[2] >= openPrice * (1 + lossTargetPercent/100) ||
+                currentPnL >= profitTargetPercent ||
+                currentPnL <= -lossTargetPercent
               ) {
                 tradeClosed = true;
                 triggerCandle = candle;
@@ -181,16 +189,28 @@ async function runBacktest({
             }
           }
   
+          // Ak bol obchod ukončený exit signálom, summary candle je triggerCandle,
+          // inak použijeme poslednú sviečku v intervale
           const summaryCandle = (tradeClosed && triggerCandle)
               ? triggerCandle
               : (oneMinCandles.length ? oneMinCandles[oneMinCandles.length - 1] : null);
+          // Vypočítame trade PnL zo získanej summary candle
           const summaryPnL = summaryCandle ? computePnL(finalAction, openPrice, summaryCandle[4]) : 0;
-          runningPnL += summaryPnL;
+          // Upravená logika: Running PnL sa aktualizuje len, ak PnL daného obchodu prekročí threshold.
+          // V opačnom prípade sa do runningPnL nič nezapocíta.
+          let effectivePnL = 0;
+          if (summaryPnL >= profitTargetPercent) {
+            effectivePnL = profitTargetPercent;
+          } else if (summaryPnL <= -lossTargetPercent) {
+            effectivePnL = -lossTargetPercent;
+          }
+          console.log(`[BacktestEngine] Pre túto iteráciu summaryPnL: ${summaryPnL.toFixed(2)}%, effectivePnL (zapocítané): ${effectivePnL.toFixed(2)}%`);
+          runningPnL += effectivePnL;
   
           summaryRow = {
             iteration: i,
             timestamp: summaryCandle ? tsToISO(summaryCandle[0]) : tsToISO(decisionTime),
-            openPrice: openPrice,
+            openPrice: openPrice, 
             closePrice: summaryCandle ? summaryCandle[4] : decisionCandle[4],
             tradePnLPercent: summaryPnL,
             runningPnLPercent: runningPnL,
@@ -202,7 +222,7 @@ async function runBacktest({
           };
         }
       } else {
-        // Ak GPT neodporúča obchod (žiadny signál), použijeme údaje rozhodovacej candle
+        // Ak GPT neodporúča obchod (žiadny signál), použijeme údaje decision candle
         summaryRow = {
           iteration: i,
           timestamp: tsToISO(decisionTime),
