@@ -6,16 +6,11 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
   let since = fromTS;
   const finalTS = toTS || Date.now();
 
-  console.log(`[DATA LOADER] Fetching OHLCV: symbol=${symbol}, timeframe=${timeframe}, from=${tsToISO(fromTS)}, to=${tsToISO(toTS)}`);
-
   while (true) {
-    console.log(`[DATA LOADER] Attempt fetch since=${tsToISO(since)}`);
     const batch = await exchange.fetchOHLCV(symbol, timeframe, since, limit);
     if (!batch || batch.length === 0) {
-      console.log('[DATA LOADER] Batch empty, break');
       break;
     }
-    console.log(`[DATA LOADER] Got batch of ${batch.length}, first=${tsToISO(batch[0][0])}, last=${tsToISO(batch[batch.length - 1][0])}`);
     allOhlcv = allOhlcv.concat(batch);
     const lastTS = batch[batch.length - 1][0];
     if (lastTS >= finalTS) break;
@@ -25,7 +20,6 @@ async function fetchOHLCVInChunks(exchange, symbol, timeframe, fromTS, toTS, lim
   }
   // Filter lenivých sviečok, ktoré skončili po finalTS
   const filtered = allOhlcv.filter(c => c[0] <= finalTS);
-  console.log(`[DATA LOADER] Total candles fetched: ${filtered.length}`);
   return filtered;
 }
 
@@ -34,8 +28,6 @@ async function loadTimeframesForBacktest(symbol, fromTime, toTime) {
   const limit = 1000;
   const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
   const fromTimeWithBuffer = fromTime ? Math.max(0, fromTime - SIXTY_DAYS_MS) : 0;
-
-  console.log(`[DATA LOADER] Loading timeframes for ${symbol} from ${tsToISO(fromTime)} to ${tsToISO(toTime)} with buffer ${tsToISO(fromTimeWithBuffer)}`);
 
   const [ohlcvDailyAll, ohlcvWeeklyAll, ohlcv1hAll, ohlcv15mAll, ohlcv5mAll, ohlcv1mAll] = await Promise.all([
     fetchOHLCVInChunks(exchange, symbol, '1d', fromTimeWithBuffer, toTime, limit),
